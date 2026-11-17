@@ -64,7 +64,7 @@ import {
 } from "@/lib/gridExecutor";
 import { formatConnectorName, formatPriceSig } from "@/lib/formatters";
 import { baseAmountError, legalBaseAmount } from "@/lib/order-size";
-import { applyReducing, reducingCap, type OpenBook } from "@/lib/trade-guards";
+import { applyReducing, claimInflight, ordersBlockCreate, reducingCap, type OpenBook } from "@/lib/trade-guards";
 import { useViewFacts } from "@/lib/viewFacts";
 
 // ── Type tabs config ──
@@ -320,7 +320,7 @@ export function CreateExecutor() {
   const ordersHealth = useQuery({
     queryKey: ["active-orders", server, connector, pair],
     queryFn: () => api.getActiveOrders(server!, connector, pair),
-    enabled: !!server && !!connector && !!pair,
+    enabled: !!server && !!connector && !!pair && caps.hasOrderBook,
     retry: false,
   });
 
@@ -673,6 +673,7 @@ export function CreateExecutor() {
     [executorType],
   );
 
+  const createLock = useRef(false);
   const leverageMutation = useMutation({
     mutationFn: () => {
       if (!server) throw new Error("No server");
@@ -1086,8 +1087,15 @@ export function CreateExecutor() {
                     </p>
                   )}
                   <button
-                    onClick={() => createMutation.mutate()}
-                    disabled={!caps.canTrade || !activeValidation.valid || createMutation.isPending || ordersHealth.isError || strategyHold || (executorType === "order" && !orderStrategies.includes(orderConfig.state.execution_strategy))}
+                    onClick={() => {
+                      if (!claimInflight(createLock)) return;
+                      createMutation.mutate(undefined, {
+                        onSettled: () => {
+                          createLock.current = false;
+                        },
+                      });
+                    }}
+                    disabled={!caps.canTrade || !activeValidation.valid || createMutation.isPending || ordersBlockCreate(executorType, caps.hasOrderBook, ordersHealth.isError) || strategyHold || (executorType === "order" && !orderStrategies.includes(orderConfig.state.execution_strategy))}
                     className="flex w-full items-center justify-center gap-2 rounded-lg bg-[var(--color-primary)] px-4 py-2.5 text-sm font-bold text-white transition-colors hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     {createMutation.isPending ? (

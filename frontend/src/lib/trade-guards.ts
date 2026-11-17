@@ -14,6 +14,7 @@ export interface PositionRow {
   connector?: string;
   trading_pair?: string;
   side?: string;
+  position_side?: string;
   amount?: number | string;
   leverage?: number | null;
   margin_mode?: string | null;
@@ -156,8 +157,25 @@ function sameBook(a: PositionRow, b: PositionRow): boolean {
   return (
     (a.connector || "").toLowerCase() === (b.connector || "").toLowerCase() &&
     pair(a.trading_pair) === pair(b.trading_pair) &&
-    side(a.side) === side(b.side)
+    side(a.position_side || a.side) === side(b.position_side || b.side)
   );
+}
+
+/** A failed open-order read blocks only an order or iceberg on a book venue. */
+export function ordersBlockCreate(
+  executorType: string,
+  hasOrderBook: boolean,
+  failed: boolean,
+): boolean {
+  if (!failed || !hasOrderBook) return false;
+  return executorType === "order" || executorType === "iceberg";
+}
+
+/** The first click claims the lock. A second click in the same turn does not. */
+export function claimInflight(lock: { current: boolean }): boolean {
+  if (lock.current) return false;
+  lock.current = true;
+  return true;
 }
 
 /** The stop dialog keeps the position when the venue already has one. */

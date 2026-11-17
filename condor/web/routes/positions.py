@@ -32,6 +32,12 @@ def _first_number(*values: object, default: float = 0.0) -> float:
     return default
 
 
+def apply_mark_notional(pos: dict, price: float) -> None:
+    """Replace entry notional once the mark price is known."""
+    pos["current_price"] = price
+    pos["notional_value"] = abs(float(pos.get("amount") or 0)) * float(price)
+
+
 def _optional_number(value: object) -> float | None:
     if value is None or value == "":
         return None
@@ -354,7 +360,7 @@ async def get_consolidated_positions(
                     key = (pos["connector_name"], pos["trading_pair"])
                     price = pairs_needing_price.get(key)
                     if price:
-                        pos["current_price"] = price
+                        apply_mark_notional(pos, float(price))
         except Exception as e:
             logger.warning("Failed to enrich positions with current prices: %s", e)
 

@@ -692,7 +692,10 @@ async def _refuse_offstep_resume(client, executor_id: str) -> None:
         )
     amounts = _child_amounts(executor)
     if not amounts:
-        return
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot read the child order sizes, so resume was not sent.",
+        )
     config = executor.get("config") if isinstance(executor.get("config"), dict) else {}
     connector = str(
         executor.get("connector_name") or config.get("connector_name") or ""

@@ -752,3 +752,58 @@ def test_resume_refuses_an_offstep_child(monkeypatch):
     client.executors = _Executors(6080)
     asyncio.run(resume_executor_endpoint(name="srv", executor_id="ex-1", user=_USER))
     assert resumed == ["ex-1"]
+
+    client.executors = _Executors(0)
+    with pytest.raises(HTTPException) as unread:
+        asyncio.run(
+            resume_executor_endpoint(name="srv", executor_id="ex-1", user=_USER)
+        )
+    assert unread.value.status_code == 400
+    assert "child" in unread.value.detail
+    assert resumed == ["ex-1"]
+
+
+def test_an_unread_leverage_is_not_left_in_the_config():
+    from condor.fetchers.account_settings import AccountSettingsError
+
+    trading = _Trading()
+
+    async def get_positions(**_kwargs):
+        return {
+            "data": [
+                {
+                    "connector_name": "mexc_perpetual",
+                    "trading_pair": "AIOT-USDT",
+                    "side": "LONG",
+                    "amount": 60770,
+                }
+            ]
+        }
+
+    trading.get_positions = get_positions
+    client = FakeClient()
+    client.trading = trading
+    with pytest.raises(AccountSettingsError) as caught:
+        asyncio.run(
+            apply_venue_account_settings(
+                client,
+                "master_account",
+                {
+                    "connector_name": "mexc_perpetual",
+                    "trading_pair": "AIOT-USDT",
+                    "side": 1,
+                    "leverage": 10,
+                },
+            )
+        )
+    assert "leverage" in str(caught.value)
+    assert trading.leverage_calls == []
+
+
+def test_a_filled_mark_replaces_entry_notional():
+    from condor.web.routes.positions import apply_mark_notional
+
+    row = {"amount": 60770, "entry_price": 0.08137, "notional_value": 60770 * 0.08137}
+    apply_mark_notional(row, 0.09)
+    assert row["current_price"] == 0.09
+    assert row["notional_value"] == 60770 * 0.09

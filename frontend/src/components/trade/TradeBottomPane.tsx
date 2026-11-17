@@ -22,10 +22,15 @@ import { defaultKeepPosition } from "@/lib/trade-guards";
 import { executorsQuery } from "@/lib/queryClient";
 import { TRADE_BOTTOM_PANE_KEY } from "@/lib/sessionState";
 
-function stopCloseLine(ex: ExecutorInfo | undefined): string {
+function stopCloseLine(ex: ExecutorInfo | undefined, venueAmount: number): string {
   const filled = Number(ex?.custom_info?.filled_amount);
-  const size = Number.isFinite(filled) && filled > 0 ? String(filled) : "only what it filled";
-  return `The executor stops and sells ${size} base, reduce-only. It will not sell more than it filled.`;
+  const filledOk = Number.isFinite(filled) && filled > 0;
+  if (venueAmount > (filledOk ? filled : 0) + 1e-9) {
+    const filledText = filledOk ? String(filled) : "0";
+    return `This stop will not sell. The exchange position is ${venueAmount} and this executor filled ${filledText}. Keep the position.`;
+  }
+  const size = filledOk ? String(filled) : "only what it filled";
+  return `The executor stops and sells ${size} base. It will not sell more than it filled.`;
 }
 
 interface TradeBottomPaneProps {
@@ -894,7 +899,7 @@ export function TradeBottomPane({
               <span className="text-xs text-[var(--color-text)]">{stopCopy.label}</span>
             </label>
             <p className="mt-1 ml-6 text-[11px] text-[var(--color-text-muted)]">
-              {keepPosition ? stopCopy.checked : stopCloseLine(executors.find((ex) => ex.id === confirmStopId))}
+              {keepPosition ? stopCopy.checked : stopCloseLine(executors.find((ex) => ex.id === confirmStopId), venueAmount)}
             </p>
             <div className="mt-3 flex justify-end gap-2">
               <button

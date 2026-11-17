@@ -396,8 +396,11 @@ export function useOrderConfig(sizeRule: SizeRule | null = null, baseSymbol = "b
       if (!sent.error) {
         input.totalAmount = sent.total;
         input.sliceAmount = sent.perSlice;
+        if (sent.sizeUnit) input.sizeUnit = sent.sizeUnit;
       }
-      const config = rangeIcebergConfig(input, connector, pair, state.marginExplicit && !isSpot);
+      const includeMargin = state.marginExplicit && !isSpot;
+      const config = rangeIcebergConfig(input, connector, pair, includeMargin);
+      if (includeMargin) config.margin_explicit = true;
       return {
         executor_type: "range_iceberg_executor" as const,
         config,

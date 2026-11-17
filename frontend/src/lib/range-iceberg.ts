@@ -167,6 +167,8 @@ export interface IcebergSent {
   total: number;
   perSlice: number;
   sliceCount: number;
+  /** BASE after a quote conversion, so the executor does not convert again. */
+  sizeUnit?: "BASE" | "QUOTE" | "CONTRACTS";
   error: string | null;
 }
 
@@ -208,7 +210,23 @@ export function icebergSentSize(
   const step = input.sizeUnit === "CONTRACTS" ? 1 : rule?.increment ?? 0;
   const min = input.sizeUnit === "CONTRACTS" ? 1 : rule?.minOrderSize ?? 0;
   if (!(step > 0)) {
-    return { total: input.totalAmount, perSlice: raw.perSlice, sliceCount: raw.sliceCount, error: null };
+    if (input.sizeUnit === "QUOTE") {
+      return {
+        total: baseTotal,
+        perSlice: baseTotal / raw.sliceCount,
+        sliceCount: raw.sliceCount,
+        sizeUnit: "BASE",
+        error: null,
+      };
+    }
+    const total = maxBase > 0 && input.totalAmount > maxBase ? maxBase : input.totalAmount;
+    return {
+      total,
+      perSlice: total / raw.sliceCount,
+      sliceCount: raw.sliceCount,
+      sizeUnit: input.sizeUnit,
+      error: null,
+    };
   }
   const child = floorBaseAmount(baseTotal / raw.sliceCount, step);
   if (!(child > 0) || (min > 0 && child < min)) {
@@ -220,15 +238,13 @@ export function icebergSentSize(
     };
   }
   const sentBase = Number((child * raw.sliceCount).toPrecision(12));
-  if (input.sizeUnit === "QUOTE") {
-    return {
-      total: Number((sentBase * price).toPrecision(12)),
-      perSlice: Number((child * price).toPrecision(12)),
-      sliceCount: raw.sliceCount,
-      error: null,
-    };
-  }
-  return { total: sentBase, perSlice: child, sliceCount: raw.sliceCount, error: null };
+  return {
+    total: sentBase,
+    perSlice: child,
+    sliceCount: raw.sliceCount,
+    sizeUnit: input.sizeUnit === "CONTRACTS" ? "CONTRACTS" : "BASE",
+    error: null,
+  };
 }
 
 /** The `config` body for `POST /executors/` with `executor_type: range_iceberg_executor`. */

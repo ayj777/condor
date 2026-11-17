@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { fallbackStrategy } from "./order-strategy";
 import { icebergSentSize, type RangeIcebergInput } from "./range-iceberg";
-import { applyClose, applyReducing, defaultKeepPosition, resultingSize, rowsForPane, sideOptions } from "./trade-guards";
+import { applyClose, applyReducing, claimInflight, defaultKeepPosition, ordersBlockCreate, resultingSize, rowsForPane, sideOptions } from "./trade-guards";
 
 const input = (patch: Partial<RangeIcebergInput> = {}): RangeIcebergInput => ({
   side: "BUY",
@@ -103,6 +103,43 @@ describe("review guards", () => {
     expect(labels[1].label).toMatch(/reduces/);
     expect(defaultKeepPosition(60770)).toBe(true);
     expect(defaultKeepPosition(0)).toBe(false);
+  });
+
+  it("sends a quote iceberg as floored base", () => {
+    const sent = icebergSentSize(
+      input({ sizeUnit: "QUOTE", totalAmount: 80, levels: 2, priceLow: 0.08, priceHigh: 0.08 }),
+      { minOrderSize: 10, increment: 10 },
+      0.08,
+      false,
+    );
+    expect(sent.error).toBeNull();
+    expect(sent.sizeUnit).toBe("BASE");
+    expect(sent.perSlice % 10).toBe(0);
+    expect(sent.total).toBe(sent.perSlice * sent.sliceCount);
+  });
+
+  it("does not treat a hedge short as the same book as the long", () => {
+    const rows = rowsForPane(
+      [{ connector: "mexc_perpetual", trading_pair: "AIOT-USDT", position_side: "SHORT", amount: 10, source: "executor" }],
+      [{ connector: "mexc_perpetual", trading_pair: "AIOT-USDT", position_side: "LONG", amount: 60770, source: "venue" }],
+    );
+    expect(rows.map((row) => row.position_side)).toEqual(["LONG", "SHORT"]);
+  });
+
+  it("blocks create only for an order book order or iceberg", () => {
+    expect(ordersBlockCreate("order", true, true)).toBe(true);
+    expect(ordersBlockCreate("iceberg", true, true)).toBe(true);
+    expect(ordersBlockCreate("grid", true, true)).toBe(false);
+    expect(ordersBlockCreate("lp", true, true)).toBe(false);
+    expect(ordersBlockCreate("order", false, true)).toBe(false);
+  });
+
+  it("ignores a second create click until the lock is released", () => {
+    const lock = { current: false };
+    expect(claimInflight(lock)).toBe(true);
+    expect(claimInflight(lock)).toBe(false);
+    lock.current = false;
+    expect(claimInflight(lock)).toBe(true);
   });
 
   it("shows the exchange amount and a tracked twin only when they differ", () => {

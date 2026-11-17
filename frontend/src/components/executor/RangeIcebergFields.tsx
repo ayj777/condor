@@ -122,6 +122,11 @@ export function RangeIcebergFields({
         step={sizeRule && state.ri_size_unit === "BASE" && sizeRule.increment > 0 ? sizeRule.increment : 0.001}
         min={0}
       />
+      {state.ri_size_unit === "QUOTE" && sent.error == null && sent.total > 0 && (
+        <p className="text-[10px] text-[var(--color-text-muted)]">
+          This order sends {sent.total} {baseSymbol}, {sent.perSlice} per slice.
+        </p>
+      )}
       {sizeRule && state.ri_size_unit === "BASE" && sizeRule.minOrderSize > 0 && (
         <p className="text-[10px] text-[var(--color-text-muted)]">
           Step {sizeRule.increment || sizeRule.minOrderSize} {baseSymbol}. Minimum {sizeRule.minOrderSize}.
