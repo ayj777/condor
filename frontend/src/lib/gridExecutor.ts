@@ -1,5 +1,6 @@
 // ── Grid executor state machine (shared by CreateExecutor, GridConfigPanel and DexPool) ──
 
+import { tradingProfile } from "@/lib/connector-capabilities";
 import { roundToPricePrecision } from "@/lib/formatters";
 import { loadPersistedDefaults, savePersistedDefaults } from "@/components/executor/persisted-defaults";
 import { GRID_STORAGE_KEY, LAST_MARKET_KEY } from "@/lib/sessionState";
@@ -137,6 +138,8 @@ export function saveGridDefaults(state: GridState) {
 }
 
 export function isSpotConnector(connector: string): boolean {
+  const profile = tradingProfile(connector);
+  if (profile) return !profile.perpetual;
   return !connector.includes("perpetual");
 }
 

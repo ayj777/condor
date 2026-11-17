@@ -15,8 +15,20 @@ POSITIONS_PAGE_SIZE = 200
 
 
 def _extract_positions(result: Any) -> List[Dict[str, Any]]:
-    """Rows out of one ``get_positions`` page."""
-    return result.get("data", []) if isinstance(result, dict) else []
+    """Rows out of one ``get_positions`` page.
+
+    The stock client returns ``{"data": [...]}``. A fork that answers with the
+    list itself, or nests it under ``positions``, used to be read as an empty
+    book, and the trade page then said the account was flat.
+    """
+    if isinstance(result, list):
+        return [row for row in result if isinstance(row, dict)]
+    if isinstance(result, dict):
+        for key in ("data", "positions"):
+            rows = result.get(key)
+            if isinstance(rows, list):
+                return [row for row in rows if isinstance(row, dict)]
+    return []
 
 
 async def fetch_positions(

@@ -921,11 +921,14 @@ async def build_closeout(
     # without these every running directional executor would read as a position
     # the venue holds and nothing accounts for.
     active_rows, unmeasured = venue_drift.tracked_from_active(mine)
+    from condor.venue_capabilities import is_perpetual_connector
+
     spot_holds = [
         row
         for row in tracked_rows
-        if "_perpetual"
-        not in str(row.get("connector_name") or row.get("connector") or "")
+        if not is_perpetual_connector(
+            str(row.get("connector_name") or row.get("connector") or "")
+        )
     ]
     if isinstance(venue, BaseException):
         _, message = describe_executor_error(venue)

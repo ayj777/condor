@@ -421,6 +421,8 @@ def _known_verbs() -> set[str]:
         "manage_controllers:upsert",
         "manage_controllers:delete",
         "stop_executor",
+        "resume_executor",
+        "cancel_order",
         "clear_position_held",
         *CREATE_EXECUTOR_TOOLS,
     }

@@ -395,7 +395,23 @@ async def create_executor_endpoint(
 
     await _ensure_dex_tokens_listed(client, config)
 
+    from condor.fetchers.account_settings import (
+        apply_venue_account_settings,
+        strip_order_only_fields,
+    )
     from condor.fetchers.executors import create_executor
+
+    margin_applied = None
+    try:
+        # Before the create, and before unknown fields are stripped: a MEXC
+        # limit order does not carry leverage onto the exchange by itself.
+        margin_applied = await apply_venue_account_settings(
+            client, body.account_name, config
+        )
+    except Exception as e:
+        logger.exception("Failed to apply account settings on '%s'", name)
+        raise upstream_error("Failed to set leverage or margin mode", e)
+    strip_order_only_fields(body.executor_type, config)
 
     try:
         # No controller_id: the fetcher takes none, so the trading API applies its
@@ -416,7 +432,13 @@ async def create_executor_endpoint(
             f"{config.get('trading_pair') or '?'}"
         ),
     )
-    return {"status": "ok", "executor_id": executor_id}
+    response = {"status": "ok", "executor_id": executor_id}
+    # Present only when this venue confirms leverage and margin on the account.
+    # False means the API has no margin-mode route; range iceberg still applies
+    # the mode itself, a plain order keeps the connector's current mode.
+    if margin_applied is not None:
+        response["margin_mode_applied"] = margin_applied
+    return response
 
 
 @router.post("/servers/{name}/executors/{executor_id}/stop")
@@ -443,6 +465,50 @@ async def stop_executor_endpoint(
         summary=f"Stop executor {executor_id[:12]}...{suffix}",
     )
     return {"status": "ok", "result": result}
+
+
+@router.post("/servers/{name}/executors/{executor_id}/resume")
+async def resume_executor_endpoint(
+    name: str,
+    executor_id: str,
+    user: WebUser = Depends(require_server_access),
+):
+    """Resume a paused executor.
+
+    Range iceberg pauses itself on ``unknown_order_halt`` and stays
+    ``RUNNING``. The stock client has ``stop_executor`` and no resume. This
+    calls ``resume_executor`` when the installed client grew one, and otherwise
+    posts ``/executors/{id}/resume``. A 404 is a 501: the button is still
+    shown, and the message says this API cannot resume.
+    """
+    cm = get_config_manager()
+    client = await cm.get_client(name)
+
+    from condor.fetchers.executors import describe_executor_error
+
+    try:
+        result = await _resume_executor(client, executor_id)
+    except Exception as e:
+        status, _message = describe_executor_error(e)
+        if status == 404:
+            raise HTTPException(
+                status_code=501,
+                detail="This trading API does not support resuming executors",
+            )
+        raise upstream_error("Failed to resume executor", e)
+    record_ui_deed(
+        user,
+        verb="resume_executor",
+        summary=f"Resume executor {executor_id[:12]}...",
+    )
+    return {"status": "ok", "result": result}
+
+
+async def _resume_executor(client, executor_id: str):
+    method = getattr(client.executors, "resume_executor", None)
+    if method is not None:
+        return await method(executor_id)
+    return await client.executors._post(f"/executors/{executor_id}/resume")
 
 
 @router.get("/servers/{name}/executors/positions")

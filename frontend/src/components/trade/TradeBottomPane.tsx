@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { createPortal } from "react-dom";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { ChevronUp, ChevronDown, Loader2, Square, Trash2, Wallet, Clock, ArrowUpDown, ArrowUp, ArrowDown } from "lucide-react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { ChevronUp, ChevronDown, Loader2, Play, Square, Trash2, Wallet, Clock, ArrowUpDown, ArrowUp, ArrowDown } from "lucide-react";
 
 import { api, type ExecutorInfo, type ConsolidatedPosition } from "@/lib/api";
 import { useServer } from "@/hooks/useServer";
@@ -16,6 +16,7 @@ import {
   pnlTextClass,
   isExecutorActive,
 } from "@/lib/formatters";
+import { executorRunDetail, executorTypeLabel } from "@/lib/executor-run";
 import { stopKeepCopy } from "@/lib/executorStopCopy";
 import { executorsQuery } from "@/lib/queryClient";
 import { TRADE_BOTTOM_PANE_KEY } from "@/lib/sessionState";
@@ -37,19 +38,19 @@ interface TradeBottomPaneProps {
   quoteSymbol?: string;
   selectedExecutorId?: string | null;
   onExecutorSelect?: (executor: ExecutorInfo | null) => void;
+  /** Working orders for this market. Off for venues with no order book. */
+  showOrders?: boolean;
 }
 
-const STRATEGY_LABELS: Record<string, string> = {
-  LIMIT: "Limit",
-  LIMIT_CHASER: "Chaser",
-  MARKET: "Market",
-  TWAP: "TWAP",
-};
+function formatPositionAmount(val: number): string {
+  const abs = Math.abs(val);
+  if (!Number.isFinite(abs)) return "0";
+  if (abs >= 1 && Number.isInteger(abs)) return abs.toLocaleString("en-US");
+  return abs.toLocaleString("en-US", { maximumFractionDigits: 4 });
+}
 
-function executorTypeLabel(ex: ExecutorInfo): string {
-  const strategy = String(ex.config?.execution_strategy ?? "").toUpperCase();
-  if (strategy && STRATEGY_LABELS[strategy]) return STRATEGY_LABELS[strategy];
-  return ex.type ? ex.type.charAt(0).toUpperCase() + ex.type.slice(1) : "—";
+function formatLeverage(val: number): string {
+  return Number.isInteger(val) ? String(val) : String(Math.round(val * 100) / 100);
 }
 
 function formatBalance(val: number): string {
@@ -245,6 +246,7 @@ export function TradeBottomPane({
   quoteSymbol,
   selectedExecutorId,
   onExecutorSelect,
+  showOrders = false,
 }: TradeBottomPaneProps) {
   const { server } = useServer();
   const queryClient = useQueryClient();
@@ -252,7 +254,7 @@ export function TradeBottomPane({
   const [expanded, setExpanded] = useState(() => {
     try { return localStorage.getItem(TRADE_BOTTOM_PANE_KEY) !== "0"; } catch { return true; }
   });
-  const [tab, setTab] = useState<"executors" | "positions">("executors");
+  const [tab, setTab] = useState<"executors" | "positions" | "orders">("executors");
   const [stoppingIds, setStoppingIds] = useState<Set<string>>(new Set());
   const [confirmStopId, setConfirmStopId] = useState<string | null>(null);
   const [keepPosition, setKeepPosition] = useState(false);
@@ -298,6 +300,30 @@ export function TradeBottomPane({
       queryClient.invalidateQueries({ queryKey: executorsQuery(server).prefix });
       queryClient.invalidateQueries({ queryKey: ["dex-lp-executors", server] });
       queryClient.invalidateQueries({ queryKey: ["executors-infinite", server] });
+    },
+  });
+
+  const [resumeError, setResumeError] = useState<string | null>(null);
+  const resumeMutation = useMutation({
+    mutationFn: (id: string) => api.resumeExecutor(server!, id),
+    onSuccess: () => setResumeError(null),
+    onError: (error: Error) => setResumeError(error.message),
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: executorsQuery(server).prefix });
+    },
+  });
+
+  const ordersQuery = useQuery({
+    queryKey: ["active-orders", server, connector, pair],
+    queryFn: () => api.getActiveOrders(server!, connector, pair),
+    enabled: !!server && showOrders && expanded,
+    refetchInterval: expanded && showOrders ? 5_000 : false,
+  });
+  const openOrders = ordersQuery.data?.orders ?? [];
+  const cancelMutation = useMutation({
+    mutationFn: (orderId: string) => api.cancelOrder(server!, connector, orderId),
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: ["active-orders", server, connector, pair] });
     },
   });
 
@@ -462,6 +488,18 @@ export function TradeBottomPane({
             >
               Executors ({executors.length})
             </button>
+            {showOrders && (
+              <button
+                onClick={() => setTab("orders")}
+                className={`flex-1 px-3 py-1.5 text-[11px] font-medium transition-colors ${
+                  tab === "orders"
+                    ? "border-b-2 border-[var(--color-primary)] text-[var(--color-primary)]"
+                    : "text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
+                }`}
+              >
+                Orders ({openOrders.length})
+              </button>
+            )}
             <button
               onClick={() => setTab("positions")}
               className={`flex-1 px-3 py-1.5 text-[11px] font-medium transition-colors ${
@@ -548,16 +586,33 @@ export function TradeBottomPane({
                             </span>
                           </td>
                           <td className="px-3 py-1.5">
-                            {active ? (
-                              <span className="inline-flex items-center gap-1 rounded-full bg-[var(--color-green)]/15 px-1.5 py-0.5 text-[9px] font-bold text-[var(--color-green)]">
-                                <span className="h-1.5 w-1.5 rounded-full bg-[var(--color-green)] animate-pulse" />
-                                ACTIVE
-                              </span>
-                            ) : (
-                              <span className="rounded px-1.5 py-0.5 text-[9px] font-medium bg-[var(--color-text-muted)]/10 text-[var(--color-text-muted)] capitalize">
-                                {closeLabel || ex.status}
-                              </span>
-                            )}
+                            {(() => {
+                              const detail = executorRunDetail(ex);
+                              return (
+                                <div className="flex flex-col gap-0.5">
+                                  {active ? (
+                                    <span className="inline-flex w-fit items-center gap-1 rounded-full bg-[var(--color-green)]/15 px-1.5 py-0.5 text-[9px] font-bold text-[var(--color-green)]">
+                                      <span className="h-1.5 w-1.5 rounded-full bg-[var(--color-green)] animate-pulse" />
+                                      {detail.halt ? "PAUSED" : "ACTIVE"}
+                                    </span>
+                                  ) : (
+                                    <span className="rounded px-1.5 py-0.5 text-[9px] font-medium bg-[var(--color-text-muted)]/10 text-[var(--color-text-muted)] capitalize">
+                                      {closeLabel || ex.status}
+                                    </span>
+                                  )}
+                                  {detail.filled && (
+                                    <span className="font-mono text-[9px] text-[var(--color-text-muted)]">
+                                      filled {detail.filled}
+                                    </span>
+                                  )}
+                                  {detail.halt && (
+                                    <span className="text-[9px] text-[var(--color-red)]" title={detail.halt}>
+                                      {detail.halt}
+                                    </span>
+                                  )}
+                                </div>
+                              );
+                            })()}
                           </td>
                           <td className="px-3 py-1.5 text-right font-mono tabular-nums text-[var(--color-text-muted)]">
                             {entry > 0 ? formatPriceSig(entry) : "—"}
@@ -587,6 +642,16 @@ export function TradeBottomPane({
                             </span>
                           </td>
                           <td className="px-2 py-1.5 text-center" onClick={(e) => e.stopPropagation()}>
+                            {active && executorRunDetail(ex).canResume && (
+                              <button
+                                onClick={() => resumeMutation.mutate(ex.id)}
+                                disabled={resumeMutation.isPending}
+                                className="rounded p-0.5 text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-primary)]/20 hover:text-[var(--color-primary)] disabled:opacity-50"
+                                title="Resume executor"
+                              >
+                                <Play className="h-3 w-3" />
+                              </button>
+                            )}
                             {active && (
                               <button
                                 onClick={() => handleStop(ex.id)}
@@ -608,6 +673,41 @@ export function TradeBottomPane({
                   )}
                 </tbody>
               </table>
+            )}
+
+            {tab === "orders" && showOrders && (
+              <div className="space-y-1 p-2">
+                {ordersQuery.isLoading ? (
+                  <p className="py-3 text-center text-[var(--color-text-muted)]">Loading orders...</p>
+                ) : openOrders.length === 0 ? (
+                  <p className="py-3 text-center text-[var(--color-text-muted)]">No open orders for this pair</p>
+                ) : (
+                  openOrders.map((order) => (
+                    <div
+                      key={order.client_order_id}
+                      className="flex items-center justify-between rounded border border-[var(--color-border)]/50 bg-[var(--color-bg)] px-2.5 py-1.5 text-[11px]"
+                    >
+                      <div className="flex items-center gap-2">
+                        <span className="text-[10px] font-semibold uppercase">{order.trade_type || "—"}</span>
+                        <span className="font-mono">{order.amount}</span>
+                        <span className="text-[var(--color-text-muted)]">@ {formatPriceSig(order.price)}</span>
+                        <span className="text-[var(--color-text-muted)]">{order.order_type}</span>
+                      </div>
+                      <button
+                        onClick={() => cancelMutation.mutate(order.client_order_id)}
+                        disabled={cancelMutation.isPending || !order.client_order_id}
+                        className="rounded px-1.5 py-0.5 text-[10px] text-[var(--color-text-muted)] hover:bg-[var(--color-red)]/20 hover:text-[var(--color-red)] disabled:opacity-50"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  ))
+                )}
+              </div>
+            )}
+
+            {resumeError && (
+              <p className="px-3 py-1 text-[10px] text-[var(--color-red)]">{resumeError}</p>
             )}
 
             {tab === "positions" && (
@@ -648,7 +748,7 @@ export function TradeBottomPane({
                               </span>
                             )}
                             <div className="text-[11px]">
-                              <span className="text-[var(--color-text)]">{Math.abs(pos.amount).toFixed(4)}</span>
+                              <span className="text-[var(--color-text)]">{formatPositionAmount(pos.amount)}</span>
                               <span className="ml-1 text-[var(--color-text-muted)]">
                                 (${(pos.notional_value ?? Math.abs(pos.amount) * pos.entry_price).toFixed(2)})
                               </span>
@@ -656,17 +756,23 @@ export function TradeBottomPane({
                             </div>
                           </div>
                           <div className="flex items-center gap-3 text-[11px]">
-                            {!isFlat && (
+                            {pos.source === "venue" && (
+                              <span className="rounded border border-[var(--color-border)] px-1 py-0.5 text-[9px] text-[var(--color-text-muted)]">
+                                exchange
+                              </span>
+                            )}
+                            {!isFlat && pos.current_price > 0 && (
                               <span className="text-[var(--color-text-muted)]">
                                 Now: {formatPriceSig(pos.current_price)}
                               </span>
                             )}
                             {pos.leverage > 1 && (
-                              <span className="text-[10px] text-[var(--color-text-muted)]">{pos.leverage}x</span>
+                              <span className="text-[10px] text-[var(--color-text-muted)]">{formatLeverage(pos.leverage)}x</span>
                             )}
                             <span className={`font-mono font-medium ${pnlTextClass(pos.unrealized_pnl)}`}>
                               {fmtPnl(pos.unrealized_pnl)}
                             </span>
+                            {pos.source !== "venue" && (
                             <button
                               onClick={() => setConfirmClearPos(pos)}
                               disabled={isClearing}
@@ -679,6 +785,7 @@ export function TradeBottomPane({
                                 <Trash2 className="h-3 w-3" />
                               )}
                             </button>
+                            )}
                           </div>
                         </div>
                         <div className="mt-1 flex items-center gap-3 text-[10px] text-[var(--color-text-muted)]">

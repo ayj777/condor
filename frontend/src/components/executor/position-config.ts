@@ -25,6 +25,8 @@ export interface PositionState {
   amount: number;
   entry_price: number; // 0 = market order
   leverage: number;
+  /** True only after the user edits leverage. Seeding from an open position must not. */
+  leverageExplicit: boolean;
   stop_loss: number; // decimal e.g. 0.02 = 2%, 0 = disabled
   take_profit: number;
   time_limit: number; // seconds, 0 = disabled
@@ -52,13 +54,15 @@ export type PositionAction =
   | { type: "SET_FIELD"; field: string; value: unknown }
   | { type: "SET_CONNECTOR"; value: string }
   | { type: "SET_PAIR"; value: string }
-  | { type: "ANCHOR"; price: number };
+  | { type: "ANCHOR"; price: number }
+  | { type: "ADOPT_LEVERAGE"; value: number };
 
 export const POSITION_DEFAULTS: PositionState = {
   side: 1,
   amount: 0,
   entry_price: 0,
   leverage: 10,
+  leverageExplicit: false,
   stop_loss: 0.03,
   take_profit: 0.02,
   time_limit: 0,
@@ -94,12 +98,17 @@ function saveDefaults(state: PositionState) {
 export function positionReducer(state: PositionState, action: PositionAction): PositionState {
   switch (action.type) {
     case "SET_FIELD": {
-      const next = { ...state, [action.field]: action.value };
-      return next;
+      if (action.field === "leverage") {
+        return { ...state, leverage: Number(action.value), leverageExplicit: true };
+      }
+      return { ...state, [action.field]: action.value };
     }
+    case "ADOPT_LEVERAGE":
+      if (state.leverageExplicit) return state;
+      return { ...state, leverage: action.value };
     case "SET_CONNECTOR":
     case "SET_PAIR":
-      return { ...state, entry_price: 0, anchored: false };
+      return { ...state, entry_price: 0, anchored: false, leverageExplicit: false };
     case "ANCHOR": {
       if (state.anchored) return state;
       // Only fills an entry nobody has set. The flag flips either way — this
@@ -210,6 +219,7 @@ export function usePositionConfig() {
       leverage: isSpot ? 1 : state.leverage,
       triple_barrier_config: tripleBarrier,
     };
+    if (state.leverageExplicit) config.leverage_explicit = true;
     if (state.entry_price > 0) config.entry_price = state.entry_price;
     if (state.activation_bounds > 0) config.activation_bounds = state.activation_bounds;
 

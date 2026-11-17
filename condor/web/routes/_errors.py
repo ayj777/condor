@@ -23,7 +23,7 @@ from condor.fetchers.executors import describe_executor_error
 __all__ = ["upstream_error"]
 
 
-def upstream_error(action: str, exc: Exception) -> HTTPException:
+def upstream_error(action: str, exc: Exception, connector: str = "") -> HTTPException:
     """Map a failed backend call to an ``HTTPException`` that leaks nothing.
 
     An upstream 4xx is the caller's own bad request and stays a 400; anything
@@ -31,10 +31,14 @@ def upstream_error(action: str, exc: Exception) -> HTTPException:
     failing to reach its backend, so 502. The detail carries the API's message
     but never the raw exception.
 
+    ``connector`` names the venue in an exchange error code (a MEXC 402 comes
+    back as ``MEXC code 402: ...``). Omit it and the same text is labelled
+    ``Exchange``.
+
     Callers log the exception before raising: the address belongs in the server
     log, where an operator needs it, not in the response, where a trader on a
     shared server would read it.
     """
-    status, message = describe_executor_error(exc)
+    status, message = describe_executor_error(exc, connector=connector)
     code = 400 if status is not None and 400 <= status < 500 else 502
     return HTTPException(status_code=code, detail=f"{action}: {message}")

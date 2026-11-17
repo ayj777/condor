@@ -944,7 +944,7 @@ export interface ConsolidatedPosition {
   executor_ids?: string[];
   leverage: number;
   controller_id: string;
-  source: "executor" | "bot";
+  source: "executor" | "bot" | "venue";
   source_name: string;
   /**
    * Set only on a pool workspace: whether this hold is known to be *this* pool's.
@@ -960,6 +960,8 @@ export interface ConsolidatedPosition {
 export interface ConsolidatedPositionsResponse {
   executor_positions: ConsolidatedPosition[];
   bot_positions: ConsolidatedPosition[];
+  /** Exchange positions that no executor is already tracking. */
+  venue_positions?: ConsolidatedPosition[];
 }
 
 export interface CandleData {
@@ -1172,6 +1174,18 @@ export interface TradingRule {
   min_notional_size: number;
   min_price_increment: number;
   min_base_amount_increment: number;
+  /** Empty when the venue did not say. The form then keeps its own list. */
+  supported_order_types?: string[];
+}
+
+export interface ActiveOrder {
+  client_order_id: string;
+  trading_pair: string;
+  trade_type: string;
+  order_type: string;
+  amount: number;
+  price: number;
+  status: string;
 }
 
 export interface TradingRulesResponse {
@@ -3513,7 +3527,7 @@ export const api = {
       account_name?: string;
     },
   ) =>
-    apiFetch<{ status: string; executor_id: string }>(
+    apiFetch<{ status: string; executor_id: string; margin_mode_applied?: boolean }>(
       `/api/v1/servers/${encodeURIComponent(server)}/executors`,
       { method: "POST", body: JSON.stringify(data) },
     ),
@@ -3521,6 +3535,23 @@ export const api = {
   stopExecutor: (server: string, executorId: string, keepPosition = false) =>
     apiFetch<{ status: string; result: unknown }>(
       `/api/v1/servers/${encodeURIComponent(server)}/executors/${encodeURIComponent(executorId)}/stop?keep_position=${keepPosition}`,
+      { method: "POST" },
+    ),
+
+  resumeExecutor: (server: string, executorId: string) =>
+    apiFetch<{ status: string; result: unknown }>(
+      `/api/v1/servers/${encodeURIComponent(server)}/executors/${encodeURIComponent(executorId)}/resume`,
+      { method: "POST" },
+    ),
+
+  getActiveOrders: (server: string, connector: string, tradingPair: string) =>
+    apiFetch<{ orders: ActiveOrder[] }>(
+      `/api/v1/servers/${encodeURIComponent(server)}/orders/active?connector=${encodeURIComponent(connector)}&trading_pair=${encodeURIComponent(tradingPair)}`,
+    ),
+
+  cancelOrder: (server: string, connector: string, orderId: string) =>
+    apiFetch<{ status: string }>(
+      `/api/v1/servers/${encodeURIComponent(server)}/orders/${encodeURIComponent(orderId)}/cancel?connector=${encodeURIComponent(connector)}`,
       { method: "POST" },
     ),
 

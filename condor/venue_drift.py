@@ -168,7 +168,9 @@ def _price_of(row: Mapping[str, Any], *keys: str) -> float | None:
 
 def _is_perp(connector: str) -> bool:
     """Whether ``connector`` is one the venue side can answer for at all."""
-    return "_perpetual" in connector
+    from condor.venue_capabilities import is_perpetual_connector
+
+    return is_perpetual_connector(connector)
 
 
 def _key(row: Mapping[str, Any]) -> tuple[str, str, str]:

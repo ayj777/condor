@@ -6,7 +6,7 @@
  * `CreateExecutor` are exhaustive over it — so adding a member here is what makes
  * the compiler point at every site that has to learn about it.
  */
-export type ExecutorType = "grid" | "position" | "order" | "dca" | "lp";
+export type ExecutorType = "grid" | "position" | "order" | "dca" | "lp" | "iceberg";
 
 export interface ExtraLine {
   price: number;

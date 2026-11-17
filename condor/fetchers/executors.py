@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import re
 import time
 from collections import OrderedDict
 from functools import partial
@@ -658,7 +659,9 @@ async def fetch_all_executors(
     return rows
 
 
-def describe_executor_error(exc: BaseException) -> tuple[Optional[int], str]:
+def describe_executor_error(
+    exc: BaseException, connector: str = ""
+) -> tuple[Optional[int], str]:
     """Split a mutation failure into ``(upstream status, user-safe message)``.
 
     Never show a user ``str(exc)``: ``aiohttp.ClientResponseError`` stringifies
@@ -669,16 +672,53 @@ def describe_executor_error(exc: BaseException) -> tuple[Optional[int], str]:
     which has neither, collapses to a generic line.
 
     A ``None`` status means "no HTTP answer": the caller maps that to 502.
+
+    ``connector`` is only used to name an exchange in a rewritten error code
+    (``Error: 402 - API Key expired`` on ``mexc_perpetual`` becomes
+    ``MEXC code 402: API Key expired``). It never changes which status is read.
     """
     status = getattr(exc, "status", None)
     if isinstance(status, int):
         message = getattr(exc, "message", None)
+        if isinstance(message, (dict, list)):
+            message = str(message)
         if isinstance(message, str) and message.strip():
-            return status, message.strip()
+            return status, clarify_exchange_error(message.strip(), connector)
         return status, f"the trading API returned HTTP {status}"
     if isinstance(exc, (aiohttp.ClientError, asyncio.TimeoutError, OSError)):
         return None, "the trading API is unreachable"
     return None, type(exc).__name__
+
+
+_CODE_DASH = re.compile(r"^Error:\s*(\d+)\s*-\s*(.+)$", re.IGNORECASE)
+_CODE_MSG = re.compile(
+    r"""['"]code['"]\s*:\s*(\d+).+?['"](?:msg|message)['"]\s*:\s*['"]([^'"]+)['"]""",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def clarify_exchange_error(message: str, connector: str = "") -> str:
+    """Rewrite an exchange ``code``/``message`` pair into one readable sentence.
+
+    Plain text is returned unchanged, including an order id that happens to
+    contain digits (``executor 400-403-400 not found``). Only the two shapes
+    the trading API forwards from an exchange are rewritten: ``Error: 402 -
+    API Key expired`` and a dict-like ``code`` plus ``msg``/``message``.
+    """
+    text = (message or "").strip()
+    code: Optional[str] = None
+    detail: Optional[str] = None
+    dashed = _CODE_DASH.match(text)
+    if dashed:
+        code, detail = dashed.group(1), dashed.group(2).strip()
+    else:
+        embedded = _CODE_MSG.search(text)
+        if embedded:
+            code, detail = embedded.group(1), embedded.group(2).strip()
+    if not code or not detail:
+        return text
+    venue = "MEXC" if "mexc" in (connector or "").lower() else "Exchange"
+    return f"{venue} code {code}: {detail}"
 
 
 async def create_executor(

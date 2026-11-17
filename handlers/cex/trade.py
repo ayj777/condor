@@ -69,8 +69,10 @@ def _format_price(price: float) -> str:
 
 
 def _is_perpetual_connector(connector_name: str) -> bool:
-    """Check if connector is a perpetual futures exchange"""
-    return "perpetual" in connector_name.lower() if connector_name else False
+    """Check if connector is a perpetual futures exchange."""
+    from condor.venue_capabilities import is_perpetual_connector
+
+    return is_perpetual_connector(connector_name) if connector_name else False
 
 
 def _get_leverage_cache_key(connector: str, trading_pair: str) -> str:

@@ -936,13 +936,15 @@ async def list_connectors(
         and "sandbox" not in c.lower()
         and "/" not in c
     ]
+    from condor.venue_capabilities import is_perpetual_connector
+
     if type:
         if type.lower() == "perpetual":
-            names = [c for c in names if "perpetual" in c.lower()]
+            names = [c for c in names if is_perpetual_connector(c)]
         else:
-            names = [c for c in names if "perpetual" not in c.lower()]
+            names = [c for c in names if not is_perpetual_connector(c)]
     connectors = [
-        {"name": c, "type": "perpetual" if "perpetual" in c.lower() else "spot"}
+        {"name": c, "type": "perpetual" if is_perpetual_connector(c) else "spot"}
         for c in names
     ]
     return {"connectors": connectors}
@@ -1002,7 +1004,9 @@ async def add_credential(
         logger.exception(
             "Failed to add credentials for '%s' on '%s'", req.connector_name, server
         )
-        raise upstream_error("Failed to add credentials", e)
+        raise upstream_error(
+            "Failed to add credentials", e, connector=req.connector_name
+        )
     # Outside the try: the credential write already succeeded, and an
     # exception here must not be swallowed and re-reported as a failed add.
     get_server_data_service().invalidate(server, *CREDENTIAL_DERIVED)

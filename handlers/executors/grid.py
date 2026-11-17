@@ -90,7 +90,9 @@ EDITABLE_PARAMS = {
 
 def _is_perpetual(connector: str) -> bool:
     """Check if connector is a perpetual/futures market."""
-    return "_perpetual" in connector.lower()
+    from condor.venue_capabilities import is_perpetual_connector
+
+    return is_perpetual_connector(connector)
 
 
 def _format_config_block(config: Dict[str, Any]) -> str:

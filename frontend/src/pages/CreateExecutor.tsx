@@ -10,6 +10,7 @@ import {
   Grid3X3,
   Layers,
   Loader2,
+  Rows3,
   Rocket,
   Settings2,
   TrendingUp,
@@ -62,12 +63,14 @@ import {
   LOOKBACK_OPTIONS,
 } from "@/lib/gridExecutor";
 import { formatConnectorName, formatPriceSig } from "@/lib/formatters";
+import { baseAmountError, legalBaseAmount } from "@/lib/order-size";
 import { useViewFacts } from "@/lib/viewFacts";
 
 // ── Type tabs config ──
 
 const TYPE_TABS: { value: ExecutorType; label: string; icon: React.ReactNode }[] = [
   { value: "order", label: "Order", icon: <ArrowUpDown className="h-3.5 w-3.5" /> },
+  { value: "iceberg", label: "Iceberg", icon: <Rows3 className="h-3.5 w-3.5" /> },
   { value: "position", label: "Position", icon: <TrendingUp className="h-3.5 w-3.5" /> },
   { value: "grid", label: "Grid", icon: <Grid3X3 className="h-3.5 w-3.5" /> },
   { value: "dca", label: "DCA", icon: <Layers className="h-3.5 w-3.5" /> },
@@ -78,6 +81,7 @@ const TYPE_LABELS: Record<ExecutorType, string> = {
   grid: "Grid Executor",
   position: "Position Executor",
   order: "Order Executor",
+  iceberg: "Range Iceberg",
   dca: "DCA Executor",
   lp: "LP Executor",
 };
@@ -109,7 +113,6 @@ export function CreateExecutor() {
   const gridConfig = useGridConfig();
   const { state: gridState, dispatch: gridDispatch } = gridConfig;
   const positionConfig = usePositionConfig();
-  const orderConfig = useOrderConfig();
   const dcaConfig = useDCAConfig();
 
   // ── Shared market state ──
@@ -149,7 +152,13 @@ export function CreateExecutor() {
     }
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const [successInfo, setSuccessInfo] = useState<{ id: string; type: ExecutorType; connector: string; pair: string } | null>(null);
+  const [successInfo, setSuccessInfo] = useState<{
+    id: string;
+    type: ExecutorType;
+    connector: string;
+    pair: string;
+    notice?: string;
+  } | null>(null);
   const [rightPanel, setRightPanel] = useState<"config" | "depth">("config");
   // Cold start lands on the market list (FEAT-053): with no remembered market
   // there is nothing to come back to, and the alternative is a chart on a pair
@@ -246,6 +255,51 @@ export function CreateExecutor() {
     useMainControllerData(server, connector, pair);
 
   const rulesData = useTradingRules(server ?? "", connector, caps.hasTradingRules);
+  const pairRule = useMemo(() => {
+    const rule = rulesData?.rules?.find((r) => r.trading_pair === pair);
+    if (!rule) return null;
+    return {
+      minOrderSize: rule.min_order_size,
+      increment: rule.min_base_amount_increment,
+      orderTypes: rule.supported_order_types ?? [],
+    };
+  }, [rulesData, pair]);
+  const baseSymbol = pair?.split("-")[0] || "base";
+  // After the rule: the amount check and the snapped size both read it, and a
+  // hook above this line would close over a rule from the previous pair.
+  const orderConfig = useOrderConfig(pairRule, baseSymbol);
+  // The Iceberg tab is the range-iceberg strategy. Setting it during render
+  // means the first frame the user can click already submits that executor,
+  // rather than a plain order left over from the Order tab.
+  if (executorType === "iceberg" && orderConfig.state.execution_strategy !== "RANGE_ICEBERG") {
+    orderConfig.dispatch({ type: "SET_FIELD", field: "execution_strategy", value: "RANGE_ICEBERG" });
+  }
+  const openLeverage = useMemo(() => {
+    const held = mainPositions.find((p) => Math.abs(p.amount) > 0 && (p.leverage ?? 0) >= 1);
+    return held?.leverage ?? null;
+  }, [mainPositions]);
+  const leverageSeeded = useRef("");
+  useEffect(() => {
+    const key = `${connector}|${(pair || "").replaceAll("_", "-").toUpperCase()}`;
+    if (!connector || !pair || openLeverage == null) return;
+    if (leverageSeeded.current === key) return;
+    leverageSeeded.current = key;
+    orderConfig.dispatch({ type: "ADOPT_LEVERAGE", value: openLeverage });
+    positionConfig.dispatch({ type: "ADOPT_LEVERAGE", value: openLeverage });
+    // dispatch is stable. Depending on the config object would re-seed every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [connector, pair, openLeverage]);
+
+  const orderStrategies = useMemo(() => {
+    const listed = pairRule?.orderTypes ?? [];
+    if (!listed.length) return caps.orderStrategies;
+    return caps.orderStrategies.filter((strategy) => {
+      if (strategy === "RANGE_ICEBERG") return true;
+      // A chaser posts limits. It is offered only when the pair accepts them.
+      if (strategy === "LIMIT_CHASER") return listed.includes("LIMIT");
+      return listed.includes(strategy);
+    });
+  }, [caps.orderStrategies, pairRule]);
 
   // Load candles for an executor that's outside the current range
   const handleRequestCandleRange = useCallback((startTime: number) => {
@@ -409,14 +463,28 @@ export function CreateExecutor() {
 
   // ── Active config derived values ──
   const activeValidation = useMemo(() => {
-    switch (executorType) {
-      case "grid": return gridConfig.validation;
-      case "position": return positionConfig.validation;
-      case "order": return orderConfig.validation;
-      case "dca": return dcaConfig.validation;
-      case "lp": return lpConfig.validation;
-    }
-  }, [executorType, gridConfig.validation, positionConfig.validation, orderConfig.validation, dcaConfig.validation, lpConfig.validation]);
+    const base = (() => {
+      switch (executorType) {
+        case "grid": return gridConfig.validation;
+        case "position": return positionConfig.validation;
+        case "order":
+        case "iceberg":
+          return orderConfig.validation;
+        case "dca": return dcaConfig.validation;
+        case "lp": return lpConfig.validation;
+      }
+    })();
+    // The order hook already applies the pair's step. Position amounts are
+    // base too, and a 0.001 remembered from another venue must not enable a
+    // MEXC create that the exchange will reject.
+    if (executorType !== "position" || !pairRule) return base;
+    const message = baseAmountError(positionConfig.state.amount, pairRule, baseSymbol);
+    if (!message || message.startsWith("Amount required")) return base;
+    return {
+      valid: false,
+      errors: [message, ...base.errors.filter((e) => !e.startsWith("Amount"))],
+    };
+  }, [executorType, gridConfig.validation, positionConfig.validation, positionConfig.state.amount, orderConfig.validation, dcaConfig.validation, lpConfig.validation, pairRule, baseSymbol]);
 
   // What the form currently says, for the chat bubble (FEAT-060/FEAT-072).
   //
@@ -452,16 +520,39 @@ export function CreateExecutor() {
               leverage: lev(positionConfig.state.leverage),
             }
           : executorType === "order"
-            ? {
-                side: side(orderConfig.state.side),
-                "order type": orderConfig.state.execution_strategy,
-                amount: orderConfig.state.amount,
-                price:
-                  orderConfig.state.execution_strategy === "MARKET"
-                    ? undefined
-                    : formatPriceSig(orderConfig.state.price),
-                leverage: lev(orderConfig.state.leverage),
-              }
+            ? orderConfig.state.execution_strategy === "RANGE_ICEBERG"
+              ? {
+                  side: side(orderConfig.state.side),
+                  "order type": "Range iceberg",
+                  mode: orderConfig.state.ri_mode,
+                  amount: orderConfig.state.ri_total_amount,
+                  "size unit": orderConfig.state.ri_size_unit,
+                  leverage: lev(orderConfig.state.leverage),
+                  margin: isSpot ? undefined : orderConfig.state.ri_margin_mode,
+                }
+              : {
+                  side: side(orderConfig.state.side),
+                  "order type": orderConfig.state.execution_strategy,
+                  amount: orderConfig.state.amount,
+                  price:
+                    orderConfig.state.execution_strategy === "MARKET"
+                      ? undefined
+                      : formatPriceSig(orderConfig.state.price),
+                  leverage: lev(orderConfig.state.leverage),
+                  margin: caps.marginModes.length && !isSpot
+                    ? orderConfig.state.ri_margin_mode
+                    : undefined,
+                }
+            : executorType === "iceberg"
+              ? {
+                  side: side(orderConfig.state.side),
+                  "order type": "Range iceberg",
+                  mode: orderConfig.state.ri_mode,
+                  amount: orderConfig.state.ri_total_amount,
+                  "size unit": orderConfig.state.ri_size_unit,
+                  leverage: lev(orderConfig.state.leverage),
+                  margin: isSpot ? undefined : orderConfig.state.ri_margin_mode,
+                }
             : executorType === "dca"
               ? {
                   side: side(dcaConfig.state.side),
@@ -501,6 +592,7 @@ export function CreateExecutor() {
       case "grid": return gridConfig.chartProps;
       case "position": return positionConfig.chartProps;
       case "order": return orderConfig.chartProps;
+      case "iceberg": return orderConfig.chartProps;
       case "dca": return dcaConfig.chartProps;
       case "lp": return lpConfig.chartProps;
     }
@@ -533,6 +625,7 @@ export function CreateExecutor() {
           targets.positionConfig.handleChartPriceSet(field, price);
           break;
         case "order":
+        case "iceberg":
           targets.orderConfig.handleChartPriceSet(field, price);
           break;
         case "dca":
@@ -564,9 +657,19 @@ export function CreateExecutor() {
           break;
         case "position":
           payload = positionConfig.buildPayload(connector, pair, isSpot);
+          payload.config.amount = legalBaseAmount(
+            Number(payload.config.amount) || 0,
+            pairRule,
+          );
+          if (!isSpot && orderConfig.state.ri_margin_mode) {
+            payload.config.margin_mode = orderConfig.state.ri_margin_mode;
+          }
           break;
         case "order":
           payload = orderConfig.buildPayload(connector, pair, isSpot);
+          break;
+        case "iceberg":
+          payload = orderConfig.buildPayload(connector, pair, isSpot, true);
           break;
         case "dca":
           payload = dcaConfig.buildPayload(connector, pair, isSpot);
@@ -585,11 +688,19 @@ export function CreateExecutor() {
         case "grid": gridConfig.save(); break;
         case "position": positionConfig.save(); break;
         case "order": orderConfig.save(); break;
+        case "iceberg": orderConfig.save(); break;
         case "dca": dcaConfig.save(); break;
         case "lp": lpConfig.save(); break;
       }
       // Show success modal
-      setSuccessInfo({ id: data.executor_id, type: executorType, connector, pair });
+      const notice =
+        data.margin_mode_applied === false &&
+        executorType !== "iceberg" &&
+        orderConfig.state.execution_strategy !== "RANGE_ICEBERG" &&
+        orderConfig.state.ri_margin_mode !== "ISOLATED"
+          ? "This API has no margin-mode route, so the order uses the connector's current margin mode. Range iceberg confirms margin on the exchange."
+          : undefined;
+      setSuccessInfo({ id: data.executor_id, type: executorType, connector, pair, notice });
       // Invalidate executor queries so the new one appears immediately
       queryClient.invalidateQueries({
         queryKey: executorsQuery(server, { controllerId: "main", pair }).queryKey,
@@ -795,6 +906,7 @@ export function CreateExecutor() {
               connector={connector}
               pair={pair}
               isSpot={isSpot}
+              showOrders={caps.hasOrderBook}
               selectedExecutorId={selectedExecutorId}
               onExecutorSelect={(ex) => {
                 setSelectedExecutorId(ex?.id ?? null);
@@ -889,7 +1001,10 @@ export function CreateExecutor() {
                     <PositionConfigPanel state={positionConfig.state} dispatch={positionConfig.dispatch} validation={positionConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} />
                   )}
                   {executorType === "order" && (
-                    <OrderConfigPanel state={orderConfig.state} dispatch={orderConfig.dispatch} validation={orderConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} strategies={caps.orderStrategies} baseAvailable={balances.base} quoteAvailable={balances.quote} />
+                    <OrderConfigPanel state={orderConfig.state} dispatch={orderConfig.dispatch} validation={orderConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} connector={connector} strategies={orderStrategies} marginModes={caps.marginModes} sizeRule={pairRule} positionLeverage={openLeverage} baseAvailable={balances.base} quoteAvailable={balances.quote} />
+                  )}
+                  {executorType === "iceberg" && (
+                    <OrderConfigPanel state={orderConfig.state} dispatch={orderConfig.dispatch} validation={orderConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} connector={connector} strategies={orderStrategies} marginModes={caps.marginModes} sizeRule={pairRule} lockStrategy positionLeverage={openLeverage} baseAvailable={balances.base} quoteAvailable={balances.quote} />
                   )}
                   {executorType === "dca" && (
                     <DCAConfigPanel state={dcaConfig.state} dispatch={dcaConfig.dispatch} validation={dcaConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} />
@@ -916,7 +1031,9 @@ export function CreateExecutor() {
                     ) : (
                       <Rocket className="h-4 w-4" />
                     )}
-                    Create {TYPE_LABELS[executorType]}
+                    {executorType === "iceberg" || orderConfig.state.execution_strategy === "RANGE_ICEBERG"
+                      ? "Create Range Iceberg"
+                      : `Create ${TYPE_LABELS[executorType]}`}
                   </button>
                 </div>
 
@@ -933,8 +1050,15 @@ export function CreateExecutor() {
       {successInfo && (
         <ExecutorSuccessModal
           executorId={successInfo.id}
-          title={`${TYPE_LABELS[successInfo.type]} Created`}
-          subtitle={`Successfully deployed on ${successInfo.connector}`}
+          title={
+            successInfo.type === "order" && orderConfig.state.execution_strategy === "RANGE_ICEBERG"
+              ? "Range Iceberg Created"
+              : `${TYPE_LABELS[successInfo.type]} Created`
+          }
+          subtitle={
+            successInfo.notice ??
+            `Successfully deployed on ${successInfo.connector}`
+          }
           details={
             <>
               <div className="flex items-center justify-between text-[11px]">

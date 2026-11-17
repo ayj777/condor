@@ -311,6 +311,12 @@ async def get_trading_rules(
     rules = []
     for pair, rule_data in result.items():
         if isinstance(rule_data, dict):
+            raw_types = rule_data.get("supported_order_types") or []
+            order_types = (
+                [str(item).upper() for item in raw_types if item]
+                if isinstance(raw_types, list)
+                else []
+            )
             rules.append(
                 TradingRuleItem(
                     trading_pair=pair,
@@ -320,6 +326,7 @@ async def get_trading_rules(
                     min_base_amount_increment=float(
                         rule_data.get("min_base_amount_increment", 0)
                     ),
+                    supported_order_types=order_types,
                 )
             )
     return TradingRulesResponse(connector=connector, rules=rules)
