@@ -87,6 +87,10 @@ async def confirm_leverage(
     """
     if leverage < 1:
         raise AccountSettingsError("Leverage must be at least 1.")
+    if _requested_side(side) is None:
+        raise AccountSettingsError(
+            "The position side was not read, so leverage was not changed."
+        )
     profile = trading_profile(connector)
     if profile is None or not profile.confirms_account_settings or not profile.leverage:
         raise AccountSettingsError(f"{connector} does not confirm leverage here.")
@@ -102,20 +106,12 @@ async def confirm_leverage(
         )
     if current is not None and int(current) == int(leverage):
         return
-    await _set_leverage(trading, account, connector, pair, int(leverage), matched, side)
+    await _set_leverage(trading, account, connector, pair, int(leverage), side)
 
 
-def _leverage_side(matched: Optional[dict], requested: object) -> Optional[str]:
-    """The position this leverage change applies to.
-
-    A matched row wins, so a long and a short are not both changed. With no
-    row, the requested side is sent so the connector still knows which book.
-    """
-    if matched is not None:
-        named = _side_key(matched.get("position_side") or matched.get("side"))
-        if named in ("LONG", "SHORT"):
-            return named
-    named = _side_key(requested)
+def _requested_side(side: object) -> Optional[str]:
+    """LONG or SHORT from the request. Anything else is not a side."""
+    named = _side_key(side)
     return named if named in ("LONG", "SHORT") else None
 
 
@@ -125,17 +121,20 @@ async def _set_leverage(
     connector: str,
     pair: str,
     leverage: int,
-    matched: Optional[dict],
     requested: object,
 ) -> None:
-    """Call set_leverage with the position side.
+    """Call set_leverage with the side the user requested.
 
-    The stock client method has no side argument, so the body is posted
-    directly and the side is not dropped.
+    The open row is not a substitute. The stock client method has no side
+    argument, so the body is posted directly and the side is not dropped.
     """
     import inspect
 
-    position_side = _leverage_side(matched, requested)
+    position_side = _requested_side(requested)
+    if position_side is None:
+        raise AccountSettingsError(
+            "The position side was not read, so leverage was not changed."
+        )
     setter = getattr(trading, "set_leverage", None)
     accepts_side = False
     if setter is not None:
@@ -284,14 +283,16 @@ async def _open_rows(client: Any, connector: str) -> list[dict]:
 
 
 def _match_row(rows: list[dict], pair: str, side: object) -> Optional[dict]:
-    """The open row this order would change.
+    """The open row on the side the user requested.
 
-    Hedge mode can hold both sides, so the form's side wins when both are
-    open. One row on the pair is that pair's position even when the form
-    side is the reducing side.
+    A lone long is not a short. When the request does not name LONG or
+    SHORT, no row is used.
     """
     want = _pair(pair)
-    on_pair = []
+    want_side = _requested_side(side)
+    if want_side is None:
+        return None
+    sided = []
     for row in rows:
         row_pair = _pair(row.get("trading_pair") or row.get("symbol"))
         if want and row_pair != want:
@@ -301,19 +302,11 @@ def _match_row(rows: list[dict], pair: str, side: object) -> Optional[dict]:
             amount = _optional_float(row.get("net_amount_base"))
         if not amount:
             continue
-        on_pair.append(row)
-    if not on_pair:
-        return None
-    want_side = _side_key(side)
-    sided = [
-        row
-        for row in on_pair
-        if _side_key(row.get("position_side") or row.get("side")) == want_side
-    ]
+        if _side_key(row.get("position_side") or row.get("side")) != want_side:
+            continue
+        sided.append(row)
     if sided:
         return sided[0]
-    if len(on_pair) == 1:
-        return on_pair[0]
     return None
 
 

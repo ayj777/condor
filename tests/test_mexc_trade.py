@@ -1097,6 +1097,53 @@ def test_leverage_names_the_side_when_both_books_are_open():
     ]
 
 
+def test_a_short_apply_does_not_name_the_only_long():
+    from condor.fetchers.account_settings import AccountSettingsError, confirm_leverage
+
+    trading = _Trading()
+
+    async def get_positions(**_kwargs):
+        return {
+            "data": [
+                {
+                    "connector_name": "mexc_perpetual",
+                    "trading_pair": "AIOT-USDT",
+                    "position_side": "LONG",
+                    "amount": 60770,
+                    "leverage": 2,
+                }
+            ]
+        }
+
+    trading.get_positions = get_positions
+    client = FakeClient()
+    client.trading = trading
+    asyncio.run(
+        confirm_leverage(client, "master_account", "mexc_perpetual", "AIOT-USDT", 2, 2)
+    )
+    assert trading.leverage_calls == [
+        ("master_account", "mexc_perpetual", "AIOT-USDT", 2, "SHORT")
+    ]
+    config = {
+        "connector_name": "mexc_perpetual",
+        "trading_pair": "AIOT-USDT",
+        "side": 2,
+        "leverage": 1,
+    }
+    asyncio.run(apply_venue_account_settings(client, "master_account", config))
+    assert config["leverage"] == 1
+    with pytest.raises(AccountSettingsError) as missing:
+        asyncio.run(
+            confirm_leverage(
+                client, "master_account", "mexc_perpetual", "AIOT-USDT", 5, None
+            )
+        )
+    assert "side" in str(missing.value)
+    assert trading.leverage_calls == [
+        ("master_account", "mexc_perpetual", "AIOT-USDT", 2, "SHORT")
+    ]
+
+
 def test_the_stock_leverage_call_still_sends_the_side():
     from condor.fetchers.account_settings import confirm_leverage
 
