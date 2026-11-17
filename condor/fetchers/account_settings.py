@@ -210,9 +210,11 @@ async def _open_rows(client: Any, connector: str) -> list[dict]:
             "Cannot read open positions, so the order was not sent."
         )
     try:
-        from condor.fetchers.positions import fetch_positions
+        from condor.fetchers.positions import PositionBookError, fetch_positions
 
         rows = await fetch_positions(client, connector_name=connector, strict=True)
+    except PositionBookError as exc:
+        raise AccountSettingsError(str(exc)) from exc
     except AccountSettingsError:
         raise
     except Exception as exc:

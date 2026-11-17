@@ -199,6 +199,14 @@ export function icebergSentSize(
       error: "Confirm that this size is in contracts, not base coins",
     };
   }
+  if (input.sizeUnit === "CONTRACTS" && !(rule?.contractSize && rule.contractSize > 0)) {
+    return {
+      total: 0,
+      perSlice: 0,
+      sliceCount: raw.sliceCount,
+      error: "Contract size is not known, so this order was not sent",
+    };
+  }
   let baseTotal = input.totalAmount;
   if (input.sizeUnit === "QUOTE") {
     if (!(price > 0)) {
@@ -206,7 +214,12 @@ export function icebergSentSize(
     }
     baseTotal = input.totalAmount / price;
   }
-  if (maxBase > 0 && baseTotal > maxBase) baseTotal = maxBase;
+  if (input.sizeUnit === "CONTRACTS" && rule?.contractSize && maxBase > 0) {
+    const maxContracts = Math.floor(maxBase / rule.contractSize + 1e-9);
+    if (baseTotal > maxContracts) baseTotal = maxContracts;
+  } else if (maxBase > 0 && baseTotal > maxBase) {
+    baseTotal = maxBase;
+  }
   const step = input.sizeUnit === "CONTRACTS" ? 1 : rule?.increment ?? 0;
   const min = input.sizeUnit === "CONTRACTS" ? 1 : rule?.minOrderSize ?? 0;
   if (!(step > 0)) {

@@ -64,7 +64,7 @@ import {
 } from "@/lib/gridExecutor";
 import { formatConnectorName, formatPriceSig } from "@/lib/formatters";
 import { baseAmountError, legalBaseAmount } from "@/lib/order-size";
-import { applyReducing, claimInflight, ordersBlockCreate, reducingCap, type OpenBook } from "@/lib/trade-guards";
+import { applyReducing, claimInflight, ICEBERG_MARGIN_HOLD, icebergCreateHeld, ordersBlockCreate, positionModeBlocksCreate, reducingCap, type OpenBook } from "@/lib/trade-guards";
 import { useViewFacts } from "@/lib/viewFacts";
 
 // ── Type tabs config ──
@@ -252,7 +252,7 @@ export function CreateExecutor() {
   useCondorWebSocket(wsChannels, server);
 
   // Main controller data (executors + positions filtered by connector/pair)
-  const { executors: mainExecutors, overlays: mainOverlays, positions: mainPositions, isLoadingPositions } =
+  const { executors: mainExecutors, overlays: mainOverlays, positions: mainPositions, isLoadingPositions, isPositionsError } =
     useMainControllerData(server, connector, pair);
 
   const rulesData = useTradingRules(server ?? "", connector, caps.hasTradingRules);
@@ -263,6 +263,7 @@ export function CreateExecutor() {
       minOrderSize: rule.min_order_size,
       increment: rule.min_base_amount_increment,
       priceIncrement: rule.min_price_increment,
+      contractSize: rule.contract_size && rule.contract_size > 0 ? rule.contract_size : undefined,
       orderTypes: rule.supported_order_types ?? [],
     };
   }, [rulesData, pair]);
@@ -677,6 +678,7 @@ export function CreateExecutor() {
   const leverageMutation = useMutation({
     mutationFn: () => {
       if (!server) throw new Error("No server");
+      if (isPositionsError) throw new Error("Cannot read open positions, so leverage was not changed.");
       if (isLoadingPositions) throw new Error("Wait until the open position is loaded");
       if (openBook && openBook.leverage == null) {
         throw new Error("Cannot read the open leverage, so it was not changed.");
@@ -703,6 +705,12 @@ export function CreateExecutor() {
       // one stray caller away from posting a create it knows the venue will
       // reject for want of credentials.
       if (!caps.canTrade) throw new Error(`No API keys for ${connector}`);
+      if (icebergCreateHeld(caps.rangeIcebergOmitsMargin, executorType, orderConfig.state.execution_strategy)) {
+        throw new Error(ICEBERG_MARGIN_HOLD);
+      }
+      if (positionModeBlocksCreate(isSpot, executorType, positionModeQuery.isSuccess)) {
+        throw new Error("Position mode has not been read, so the order was not sent.");
+      }
 
       let payload: { executor_type: string; config: Record<string, unknown> };
 
@@ -775,6 +783,13 @@ export function CreateExecutor() {
       setSelectedExecutorId(data.executor_id);
     },
   });
+
+  const icebergHeld = icebergCreateHeld(
+    caps.rangeIcebergOmitsMargin,
+    executorType,
+    orderConfig.state.execution_strategy,
+  );
+  const modeUnread = positionModeBlocksCreate(isSpot, executorType, positionModeQuery.isSuccess);
 
   if (!server) {
     return <NoServerCard message="Select a server from the sidebar to create an executor." />;
@@ -1066,10 +1081,10 @@ export function CreateExecutor() {
                     <PositionConfigPanel state={positionConfig.state} dispatch={positionConfig.dispatch} validation={positionConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} />
                   )}
                   {executorType === "order" && (
-                    <OrderConfigPanel state={orderConfig.state} dispatch={orderConfig.dispatch} validation={orderConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} connector={connector} strategies={orderStrategies} marginModes={caps.marginModes} sizeRule={pairRule} positionLeverage={openLeverage} openBook={openBook} positionMode={positionModeQuery.data?.position_mode ?? ""} onApplyLeverage={() => leverageMutation.mutate()} applyingLeverage={leverageMutation.isPending} positionsLoaded={!isLoadingPositions} onStrategyHold={setStrategyHold} baseAvailable={balances.base} quoteAvailable={balances.quote} />
+                    <OrderConfigPanel state={orderConfig.state} dispatch={orderConfig.dispatch} validation={orderConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} connector={connector} strategies={orderStrategies} marginModes={caps.marginModes} sizeRule={pairRule} positionLeverage={openLeverage} openBook={openBook} positionMode={positionModeQuery.data?.position_mode ?? ""} onApplyLeverage={() => leverageMutation.mutate()} applyingLeverage={leverageMutation.isPending} positionsLoaded={!isLoadingPositions} positionsFailed={isPositionsError} onStrategyHold={setStrategyHold} baseAvailable={balances.base} quoteAvailable={balances.quote} />
                   )}
                   {executorType === "iceberg" && (
-                    <OrderConfigPanel state={orderConfig.state} dispatch={orderConfig.dispatch} validation={orderConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} connector={connector} strategies={orderStrategies} marginModes={caps.marginModes} sizeRule={pairRule} lockStrategy positionLeverage={openLeverage} openBook={openBook} positionMode={positionModeQuery.data?.position_mode ?? ""} onApplyLeverage={() => leverageMutation.mutate()} applyingLeverage={leverageMutation.isPending} positionsLoaded={!isLoadingPositions} baseAvailable={balances.base} quoteAvailable={balances.quote} />
+                    <OrderConfigPanel state={orderConfig.state} dispatch={orderConfig.dispatch} validation={orderConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} connector={connector} strategies={orderStrategies} marginModes={caps.marginModes} sizeRule={pairRule} lockStrategy positionLeverage={openLeverage} openBook={openBook} positionMode={positionModeQuery.data?.position_mode ?? ""} onApplyLeverage={() => leverageMutation.mutate()} applyingLeverage={leverageMutation.isPending} positionsLoaded={!isLoadingPositions} positionsFailed={isPositionsError} baseAvailable={balances.base} quoteAvailable={balances.quote} />
                   )}
                   {executorType === "dca" && (
                     <DCAConfigPanel state={dcaConfig.state} dispatch={dcaConfig.dispatch} validation={dcaConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} />
@@ -1086,6 +1101,14 @@ export function CreateExecutor() {
                       {activeValidation.errors[0]}
                     </p>
                   )}
+                  {icebergHeld && (
+                    <p className="mb-2 text-[11px] text-[var(--color-red)]">{ICEBERG_MARGIN_HOLD}</p>
+                  )}
+                  {modeUnread && (
+                    <p className="mb-2 text-[11px] text-[var(--color-red)]">
+                      Position mode has not been read, so this order was not sent.
+                    </p>
+                  )}
                   <button
                     onClick={() => {
                       if (!claimInflight(createLock)) return;
@@ -1095,7 +1118,7 @@ export function CreateExecutor() {
                         },
                       });
                     }}
-                    disabled={!caps.canTrade || !activeValidation.valid || createMutation.isPending || ordersBlockCreate(executorType, caps.hasOrderBook, ordersHealth.isError) || strategyHold || (executorType === "order" && !orderStrategies.includes(orderConfig.state.execution_strategy))}
+                    disabled={!caps.canTrade || !activeValidation.valid || createMutation.isPending || ordersBlockCreate(executorType, caps.hasOrderBook, ordersHealth.isError) || strategyHold || icebergHeld || modeUnread || (executorType === "order" && !orderStrategies.includes(orderConfig.state.execution_strategy))}
                     className="flex w-full items-center justify-center gap-2 rounded-lg bg-[var(--color-primary)] px-4 py-2.5 text-sm font-bold text-white transition-colors hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     {createMutation.isPending ? (

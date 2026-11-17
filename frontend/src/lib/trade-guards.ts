@@ -20,6 +20,29 @@ export interface PositionRow {
   margin_mode?: string | null;
 }
 
+export const ICEBERG_MARGIN_HOLD =
+  "Range iceberg stays off until the executor can leave margin unchanged. The current executor would set isolated margin on the open position.";
+
+/** True while the deployed executor would fill in isolated margin. */
+export function icebergCreateHeld(
+  omitsMargin: boolean,
+  executorType: string,
+  strategy: string,
+): boolean {
+  const iceberg = executorType === "iceberg" || strategy === "RANGE_ICEBERG";
+  return iceberg && !omitsMargin;
+}
+
+/** A perp order or iceberg waits until the position-mode read has succeeded. */
+export function positionModeBlocksCreate(
+  isSpot: boolean,
+  executorType: string,
+  loaded: boolean,
+): boolean {
+  if (isSpot || loaded) return false;
+  return executorType === "order" || executorType === "iceberg";
+}
+
 export function isOneWay(mode: string): boolean {
   const name = mode.toUpperCase();
   return name === "ONEWAY" || name === "ONE_WAY";

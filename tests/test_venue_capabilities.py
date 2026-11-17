@@ -2,6 +2,7 @@
 
 from condor.agents.shutdown import _is_perp
 from condor.venue_capabilities import (
+    iceberg_margin_block,
     is_perpetual_connector,
     perpetual_for_closeout,
     trading_profile,
@@ -21,6 +22,11 @@ def test_mexc_perpetual_profile_matches_the_connector():
     assert profile.reduce_only is True
     assert profile.range_iceberg is True
     assert profile.confirms_account_settings is True
+    assert profile.range_iceberg_omits_margin is False
+    held = iceberg_margin_block("mexc_perpetual", "range_iceberg_executor")
+    assert held is not None
+    assert "isolated" in held.lower()
+    assert iceberg_margin_block("mexc_perpetual", "order_executor") is None
 
 
 def test_binance_and_hyperliquid_stay_perpetual_without_a_margin_control():

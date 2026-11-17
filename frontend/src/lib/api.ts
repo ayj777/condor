@@ -1175,6 +1175,8 @@ export interface TradingRule {
   min_notional_size: number;
   min_price_increment: number;
   min_base_amount_increment: number;
+  /** Base coins in one contract. Zero or absent when the rules did not say. */
+  contract_size?: number;
   /** Empty when the venue did not say. The form then keeps its own list. */
   supported_order_types?: string[];
 }

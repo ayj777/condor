@@ -579,9 +579,7 @@ def test_a_live_row_without_margin_does_not_block_the_create():
     config["margin_mode"] = "CROSS"
     config["margin_explicit"] = True
     with pytest.raises(AccountSettingsError) as caught:
-        asyncio.run(
-            apply_venue_account_settings(client, "master_account", config)
-        )
+        asyncio.run(apply_venue_account_settings(client, "master_account", config))
     assert "margin mode" in str(caught.value)
 
     asyncio.run(
@@ -798,6 +796,139 @@ def test_an_unread_leverage_is_not_left_in_the_config():
         )
     assert "leverage" in str(caught.value)
     assert trading.leverage_calls == []
+
+
+def test_range_iceberg_is_refused_until_margin_can_be_omitted(monkeypatch):
+    from fastapi import HTTPException
+
+    client = FakeClient(result={"executor_id": "ex-ice"})
+    called = {"n": 0}
+
+    async def _create(*_args, **_kwargs):
+        called["n"] += 1
+        return {"executor_id": "ex-ice"}
+
+    monkeypatch.setattr(
+        "condor.web.routes.executors.get_config_manager", lambda: _CM(client)
+    )
+    monkeypatch.setattr("condor.fetchers.executors.create_executor", _create)
+    with pytest.raises(HTTPException) as caught:
+        asyncio.run(
+            create_executor_endpoint(
+                name="srv",
+                body=CreateExecutorRequest(
+                    executor_type="range_iceberg_executor",
+                    config={
+                        "connector_name": "mexc_perpetual",
+                        "trading_pair": "AIOT-USDT",
+                        "leverage": 2,
+                        "total_amount": 100,
+                    },
+                ),
+                user=_USER,
+            )
+        )
+    assert caught.value.status_code == 400
+    assert "isolated" in caught.value.detail.lower()
+    assert called["n"] == 0
+
+
+def test_a_connector_mismatch_aborts_the_create_instead_of_looking_flat():
+    from condor.fetchers.account_settings import AccountSettingsError
+
+    trading = _Trading()
+
+    async def get_positions(**_kwargs):
+        return {
+            "data": [
+                {
+                    "connector_name": "binance_perpetual",
+                    "trading_pair": "AIOT-USDT",
+                    "side": "LONG",
+                    "amount": 60770,
+                    "leverage": 2,
+                }
+            ]
+        }
+
+    trading.get_positions = get_positions
+    client = FakeClient()
+    client.trading = trading
+    with pytest.raises(AccountSettingsError) as caught:
+        asyncio.run(
+            apply_venue_account_settings(
+                client,
+                "master_account",
+                {
+                    "connector_name": "mexc_perpetual",
+                    "trading_pair": "AIOT-USDT",
+                    "side": 1,
+                    "leverage": 10,
+                },
+            )
+        )
+    assert "connector" in str(caught.value).lower()
+    assert trading.leverage_calls == []
+
+
+def test_the_trade_screen_does_not_set_leverage_on_open():
+    from handlers.cex.trade import (
+        apply_confirmed_leverage,
+        load_position_mode,
+        pair_leverage_status,
+    )
+
+    class _Screen:
+        def __init__(self):
+            self.calls = []
+
+        async def get_position_mode(self, **_kwargs):
+            return {"position_mode": "ONEWAY"}
+
+        async def get_positions(self, **_kwargs):
+            return {
+                "data": [
+                    {
+                        "connector_name": "mexc_perpetual",
+                        "trading_pair": "AIOT-USDT",
+                        "amount": 60770,
+                        "leverage": 2,
+                    }
+                ]
+            }
+
+        async def set_leverage(self, **kwargs):
+            self.calls.append(kwargs)
+
+    trading = _Screen()
+    client = FakeClient()
+    client.trading = trading
+    cache = {}
+    mode = asyncio.run(
+        load_position_mode(client, "master", "mexc_perpetual", "AIOT-USDT", cache)
+    )
+    assert mode == "ONEWAY"
+    assert cache["leverage_mexc_perpetual_AIOT-USDT"] == 2
+    assert trading.calls == []
+
+    sent = asyncio.run(
+        apply_confirmed_leverage(
+            client, "master", "mexc_perpetual", "AIOT-USDT", 2, "known", 2
+        )
+    )
+    assert sent is False
+    assert trading.calls == []
+    sent = asyncio.run(
+        apply_confirmed_leverage(
+            client, "master", "mexc_perpetual", "AIOT-USDT", 5, "known", 2
+        )
+    )
+    assert sent is True
+    assert trading.calls[0]["leverage"] == 5
+    status, _value = pair_leverage_status(
+        [{"trading_pair": "AIOT-USDT", "amount": 60770}], "AIOT-USDT"
+    )
+    assert status == "unread"
 
 
 def test_a_filled_mark_replaces_entry_notional():

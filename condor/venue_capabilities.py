@@ -33,6 +33,10 @@ class TradingProfile:
     reduce_only: bool
     range_iceberg: bool
     confirms_account_settings: bool = False
+    # Off until the executor treats a missing margin_mode as "do not touch
+    # margin". While this is off, a range iceberg is refused: the deployed
+    # executor would fill in isolated and post it onto the open position.
+    range_iceberg_omits_margin: bool = False
 
 
 # Order types and position modes are the connector's ``supported_order_types``
@@ -81,6 +85,28 @@ TRADING_PROFILES: dict[str, TradingProfile] = {
     "binance_perpetual": BINANCE_PERPETUAL,
     "hyperliquid_perpetual": HYPERLIQUID_PERPETUAL,
 }
+
+
+ICEBERG_MARGIN_HOLD = (
+    "Range iceberg stays off until the executor can leave margin unchanged. "
+    "The current executor would set isolated margin on the open position."
+)
+
+
+def iceberg_margin_block(connector: str, executor_type: str) -> str | None:
+    """Why this range iceberg must not be created, or None when it may.
+
+    The flag stays off until the executor accepts an omitted margin_mode as
+    "do not touch margin". Condor does not fill in isolated in its place.
+    """
+    if executor_type != "range_iceberg_executor":
+        return None
+    profile = trading_profile(connector)
+    if profile is None or not profile.range_iceberg:
+        return None
+    if profile.range_iceberg_omits_margin:
+        return None
+    return ICEBERG_MARGIN_HOLD
 
 
 def trading_profile(name: str) -> TradingProfile | None:

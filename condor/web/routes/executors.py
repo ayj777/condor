@@ -401,12 +401,19 @@ async def create_executor_endpoint(
         strip_order_only_fields,
     )
     from condor.fetchers.executors import create_executor
+    from condor.venue_capabilities import iceberg_margin_block
+
+    blocked = iceberg_margin_block(
+        str(config.get("connector_name") or ""), body.executor_type
+    )
+    if blocked:
+        raise HTTPException(status_code=400, detail=blocked)
 
     margin_applied = None
     try:
         # Before the create, and before unknown fields are stripped. This does
-        # not call set_leverage. It refuses the create when the open book or
-        # its margin mode cannot be read.
+        # not call set_leverage. Margin is omitted unless the user edited it.
+        # It refuses the create when the open book cannot be read.
         margin_applied = await apply_venue_account_settings(
             client, body.account_name, config
         )

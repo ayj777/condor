@@ -590,6 +590,8 @@ class TradingRuleItem(BaseModel):
     min_notional_size: float = 0.0
     min_price_increment: float = 0.0
     min_base_amount_increment: float = 0.0
+    # Base coins in one contract. Zero means the rules did not say.
+    contract_size: float = 0.0
     # Empty when the venue did not say. The trade page then keeps its own list.
     supported_order_types: list[str] = []
 

@@ -2,7 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import { fallbackStrategy } from "./order-strategy";
 import { icebergSentSize, type RangeIcebergInput } from "./range-iceberg";
-import { applyClose, applyReducing, claimInflight, defaultKeepPosition, ordersBlockCreate, resultingSize, rowsForPane, sideOptions } from "./trade-guards";
+import { quoteTogglePrice } from "./order-size";
+import { applyClose, applyReducing, claimInflight, defaultKeepPosition, icebergCreateHeld, ordersBlockCreate, positionModeBlocksCreate, resultingSize, rowsForPane, sideOptions } from "./trade-guards";
 
 const input = (patch: Partial<RangeIcebergInput> = {}): RangeIcebergInput => ({
   side: "BUY",
@@ -63,10 +64,37 @@ describe("review guards", () => {
   it("blocks contracts until they are confirmed", () => {
     const blocked = icebergSentSize(input({ sizeUnit: "CONTRACTS", totalAmount: 15 }), null, 0, false);
     expect(blocked.error).toMatch(/contracts/i);
-    const sent = icebergSentSize(input({ sizeUnit: "CONTRACTS", totalAmount: 15 }), null, 0, true);
+    const unknown = icebergSentSize(
+      input({ sizeUnit: "CONTRACTS", totalAmount: 15 }),
+      null,
+      0,
+      true,
+    );
+    expect(unknown.error).toMatch(/contract size/i);
+    const sent = icebergSentSize(
+      input({ sizeUnit: "CONTRACTS", totalAmount: 15 }),
+      { minOrderSize: 1, increment: 1, contractSize: 10 },
+      0,
+      true,
+    );
     expect(sent.error).toBeNull();
     expect(sent.perSlice).toBe(1);
+    expect(sent.sizeUnit).toBe("CONTRACTS");
     expect(sent.total).toBe(sent.perSlice * sent.sliceCount);
+  });
+
+  it("caps contracts in base before flooring each child", () => {
+    const sent = icebergSentSize(
+      input({ sizeUnit: "CONTRACTS", totalAmount: 7000, levels: 10 }),
+      { minOrderSize: 1, increment: 1, contractSize: 10 },
+      0,
+      true,
+      60770,
+    );
+    expect(sent.error).toBeNull();
+    expect(sent.perSlice).toBe(607);
+    expect(sent.total).toBe(6070);
+    expect(sent.total * 10).toBeLessThanOrEqual(60770);
   });
 
   it("falls back to limit and never rewrites a resting order to market", () => {
@@ -132,6 +160,24 @@ describe("review guards", () => {
     expect(ordersBlockCreate("grid", true, true)).toBe(false);
     expect(ordersBlockCreate("lp", true, true)).toBe(false);
     expect(ordersBlockCreate("order", false, true)).toBe(false);
+  });
+
+  it("holds a perp order until position mode is read and holds iceberg while margin would default", () => {
+    expect(positionModeBlocksCreate(false, "order", false)).toBe(true);
+    expect(positionModeBlocksCreate(false, "iceberg", false)).toBe(true);
+    expect(positionModeBlocksCreate(false, "order", true)).toBe(false);
+    expect(positionModeBlocksCreate(false, "grid", false)).toBe(false);
+    expect(positionModeBlocksCreate(true, "order", false)).toBe(false);
+    expect(icebergCreateHeld(false, "iceberg", "LIMIT")).toBe(true);
+    expect(icebergCreateHeld(false, "order", "RANGE_ICEBERG")).toBe(true);
+    expect(icebergCreateHeld(true, "iceberg", "RANGE_ICEBERG")).toBe(false);
+    expect(icebergCreateHeld(false, "order", "LIMIT")).toBe(false);
+  });
+
+  it("converts a quote amount at the limit price", () => {
+    expect(quoteTogglePrice(0.05, 0.08, true)).toBe(0.05);
+    expect(quoteTogglePrice(0, 0.08, true)).toBe(0.08);
+    expect(quoteTogglePrice(0.05, 0.08, false)).toBe(0.08);
   });
 
   it("ignores a second create click until the lock is released", () => {

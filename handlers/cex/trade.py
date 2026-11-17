@@ -80,6 +80,84 @@ def _get_leverage_cache_key(connector: str, trading_pair: str) -> str:
     return f"leverage_{connector}_{trading_pair}"
 
 
+def pair_leverage_status(rows, trading_pair: str) -> tuple[str, float | None]:
+    """How the open book reports leverage: flat, known, or unread."""
+    want = str(trading_pair or "").replace("_", "-").upper()
+    for row in rows or []:
+        pair = str(row.get("trading_pair") or "").replace("_", "-").upper()
+        if want and pair != want:
+            continue
+        try:
+            amount = float(row.get("amount") or 0)
+        except (TypeError, ValueError):
+            continue
+        if amount == 0:
+            continue
+        try:
+            value = float(row.get("leverage"))
+        except (TypeError, ValueError):
+            return "unread", None
+        if value >= 1:
+            return "known", value
+        return "unread", None
+    return "flat", None
+
+
+def should_set_leverage(status: str, current: float | None, requested: int) -> bool:
+    """True only when a confirmed value would change the open leverage.
+
+    A flat book can take the value. A known match is not sent. An unread
+    leverage is refused by the caller before this returns True.
+    """
+    if requested < 1:
+        raise ValueError("Leverage must be at least 1.")
+    if status == "unread":
+        raise ValueError("Cannot read the open leverage, so it was not changed.")
+    if status == "known" and current is not None and int(current) == int(requested):
+        return False
+    return True
+
+
+async def load_position_mode(client, account, connector, trading_pair, cache):
+    """Read the position mode, and remember an open leverage without setting one.
+
+    Opening the trade screen must not call ``set_leverage``. A cached number
+    is only the display, taken from the open position when that read works.
+    """
+    mode_result = await client.trading.get_position_mode(
+        account_name=account, connector_name=connector
+    )
+    position_mode = mode_result.get("position_mode", "HEDGE")
+    cache[_get_position_mode_cache_key(connector)] = position_mode
+    lev_key = _get_leverage_cache_key(connector, trading_pair)
+    if lev_key not in cache:
+        from condor.fetchers.positions import fetch_positions
+
+        try:
+            rows = await fetch_positions(client, connector_name=connector, strict=True)
+        except Exception:
+            rows = []
+        status, current = pair_leverage_status(rows, trading_pair)
+        if status == "known" and current is not None:
+            cache[lev_key] = int(current)
+    return position_mode
+
+
+async def apply_confirmed_leverage(
+    client, account, connector, trading_pair, leverage: int, status: str, current
+) -> bool:
+    """Set leverage after the user confirms a value that differs. Returns whether it was sent."""
+    if not should_set_leverage(status, current, leverage):
+        return False
+    await client.trading.set_leverage(
+        account_name=account,
+        connector_name=connector,
+        trading_pair=trading_pair,
+        leverage=leverage,
+    )
+    return True
+
+
 def _get_position_mode_cache_key(connector: str) -> str:
     """Get cache key for position mode"""
     return f"pos_mode_{connector}"
@@ -920,25 +998,9 @@ async def _fetch_trade_data_background(
 
     async def fetch_perpetual_settings_safe():
         try:
-            mode_result = await client.trading.get_position_mode(
-                account_name=account, connector_name=connector
+            return await load_position_mode(
+                client, account, connector, trading_pair, context.user_data
             )
-            position_mode = mode_result.get("position_mode", "HEDGE")
-            context.user_data[_get_position_mode_cache_key(connector)] = position_mode
-
-            lev_key = _get_leverage_cache_key(connector, trading_pair)
-            if lev_key not in context.user_data:
-                try:
-                    await client.trading.set_leverage(
-                        account_name=account,
-                        connector_name=connector,
-                        trading_pair=trading_pair,
-                        leverage=DEFAULT_LEVERAGE,
-                    )
-                    context.user_data[lev_key] = DEFAULT_LEVERAGE
-                except Exception:
-                    pass
-            return position_mode
         except Exception as e:
             logger.warning(f"Could not fetch perpetual settings: {e}")
             return None
@@ -2013,12 +2075,19 @@ async def process_trade_set_leverage(
         chat_id = update.effective_chat.id
         client = await get_client(chat_id, context=context)
 
-        # Set leverage on exchange
-        await client.trading.set_leverage(
-            account_name=account,
-            connector_name=connector,
-            trading_pair=trading_pair,
-            leverage=leverage,
+        from condor.fetchers.positions import fetch_positions
+
+        try:
+            rows = await fetch_positions(client, connector_name=connector, strict=True)
+        except Exception:
+            error_message = format_error_message(
+                "Cannot read the open leverage, so it was not changed."
+            )
+            await update.message.reply_text(error_message, parse_mode="MarkdownV2")
+            return
+        status, current = pair_leverage_status(rows, trading_pair)
+        await apply_confirmed_leverage(
+            client, account, connector, trading_pair, leverage, status, current
         )
 
         # Update cache

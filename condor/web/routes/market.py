@@ -346,6 +346,7 @@ async def get_trading_rules(
                     min_base_amount_increment=float(
                         rule_data.get("min_base_amount_increment", 0)
                     ),
+                    contract_size=float(rule_data.get("contract_size") or 0),
                     supported_order_types=order_types,
                 )
             )

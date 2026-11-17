@@ -12,7 +12,13 @@ indistinguishable from "flat". These tests pin the server-side
 import asyncio
 import logging
 
-from condor.fetchers.positions import POSITIONS_PAGE_SIZE, fetch_positions
+import pytest
+
+from condor.fetchers.positions import (
+    POSITIONS_PAGE_SIZE,
+    PositionBookError,
+    fetch_positions,
+)
 
 
 def _positions(connector, start, count):
@@ -184,6 +190,39 @@ def test_client_side_filter_still_guards_a_server_that_ignores_the_filter():
 
     assert len(positions) == 3
     assert {p["connector_name"] for p in positions} == {"hyperliquid_perpetual"}
+
+
+def test_a_row_without_a_connector_name_is_kept():
+    client = FakeClient(
+        [{"data": [{"trading_pair": "AIOT-USDT", "amount": 60770, "leverage": 2}]}]
+    )
+    positions = asyncio.run(fetch_positions(client, connector_name="mexc_perpetual"))
+    assert len(positions) == 1
+    assert "connector_name" not in positions[0]
+
+
+def test_connector_filter_ignores_case():
+    client = FakeClient(
+        [{"data": [{"trading_pair": "AIOT-USDT", "connector_name": "MEXC_PERPETUAL"}]}]
+    )
+    positions = asyncio.run(fetch_positions(client, connector_name="mexc_perpetual"))
+    assert len(positions) == 1
+
+
+def test_a_filter_mismatch_is_not_a_flat_book_when_strict():
+    client = FakeClient(
+        [
+            {
+                "data": [
+                    {"trading_pair": "BTC-USDT", "connector_name": "binance_perpetual"}
+                ]
+            }
+        ]
+    )
+    with pytest.raises(PositionBookError):
+        asyncio.run(
+            fetch_positions(client, connector_name="mexc_perpetual", strict=True)
+        )
 
 
 def test_extra_keyword_arguments_are_still_accepted():

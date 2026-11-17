@@ -14,6 +14,18 @@ export interface SizeRule {
   increment: number;
   /** `min_price_increment`. Zero means the venue stated no tick. */
   priceIncrement?: number;
+  /** Base coins in one contract. Absent until the trading rules say. */
+  contractSize?: number;
+}
+
+/** Price used to turn a typed quote amount into base. A limit uses its own price. */
+export function quoteTogglePrice(
+  limitPrice: number,
+  midPrice: number | null,
+  usesLimit: boolean,
+): number | null {
+  if (usesLimit && limitPrice > 0) return limitPrice;
+  return midPrice;
 }
 
 /** Nearest multiple of `increment`. An absent step returns `amount` unchanged. */

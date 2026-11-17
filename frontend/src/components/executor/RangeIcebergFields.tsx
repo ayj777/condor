@@ -87,12 +87,14 @@ export function RangeIcebergFields({
   connector,
   sizeRule,
   baseSymbol,
+  maxBase = 0,
 }: {
   state: OrderState;
   dispatch: React.Dispatch<OrderAction>;
   connector: string;
   sizeRule: SizeRule | null;
   baseSymbol: string;
+  maxBase?: number;
 }) {
   const [advanced, setAdvanced] = useState(state.ri_show_advanced);
   const set = (field: string, value: unknown) =>
@@ -102,7 +104,7 @@ export function RangeIcebergFields({
   const price = state.ri_mode === "UP_TO"
     ? state.ri_limit_price
     : Math.max(state.ri_price_low, state.ri_price_high);
-  const sent = icebergSentSize(input, sizeRule, price, state.ri_contracts_confirmed);
+  const sent = icebergSentSize(input, sizeRule, price, state.ri_contracts_confirmed, maxBase);
 
   return (
     <div className="space-y-2.5">

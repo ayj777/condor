@@ -142,7 +142,7 @@ export function useMainControllerData(
   const overlays = useMemo(() => computeMultiOverlays(executors), [executors]);
 
   // Fetch consolidated positions
-  const { data: positionsData, isLoading: isLoadingPositions } = useQuery({
+  const { data: positionsData, isLoading: isLoadingPositions, isError: isPositionsError } = useQuery({
     queryKey: ["consolidated-positions", server],
     queryFn: () => api.getConsolidatedPositions(server!),
     enabled: !!server,
@@ -221,7 +221,7 @@ export function useMainControllerData(
     executorPools,
   ]);
 
-  return { executors, overlays, positions, isLoadingPositions };
+  return { executors, overlays, positions, isLoadingPositions, isPositionsError };
 }
 
 /** `AIOT_USDT` and `AIOT-USDT` are the same market. */

@@ -57,6 +57,11 @@ export interface TradingProfile {
   rangeIceberg: boolean;
   /** A limit or market order has to set leverage on the account before create. */
   confirmsAccountSettings: boolean;
+  /**
+   * The range iceberg executor treats a missing margin mode as "do not touch
+   * margin". Off until that executor is deployed. While off, the iceberg is refused.
+   */
+  rangeIcebergOmitsMargin: boolean;
 }
 
 const TRADING_PROFILES: Record<string, TradingProfile> = {
@@ -71,6 +76,7 @@ const TRADING_PROFILES: Record<string, TradingProfile> = {
     reduceOnly: true,
     rangeIceberg: true,
     confirmsAccountSettings: true,
+    rangeIcebergOmitsMargin: false,
   },
 };
 
@@ -87,6 +93,8 @@ export interface ConnectorCapabilities {
   marginModes: string[];
   /** Whether this venue's account settings are applied before a plain order. */
   confirmsAccountSettings: boolean;
+  /** Whether a range iceberg may omit margin. False refuses the iceberg. */
+  rangeIcebergOmitsMargin: boolean;
   /** Whether `/market/order-book` and `/market/tickers` answer — depth + markets tabs. */
   hasOrderBook: boolean;
   /** Whether `/market/trading-rules` answers — pair list + price precision. */
@@ -164,6 +172,7 @@ export function connectorCapabilities(
     orderStrategies,
     marginModes: profile?.marginModes ?? [],
     confirmsAccountSettings: profile?.confirmsAccountSettings ?? false,
+    rangeIcebergOmitsMargin: profile?.rangeIcebergOmitsMargin ?? false,
     hasOrderBook: traits.hummingbotMarketData,
     hasTradingRules: traits.hummingbotMarketData,
     hasRestPrice: traits.hummingbotMarketData,

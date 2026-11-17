@@ -15,9 +15,9 @@ import {
 import type { ExecutorValidation } from "./types";
 import { usesLimitPrice, type OrderAction, type OrderState } from "./order-config";
 import { RangeIcebergFields } from "./RangeIcebergFields";
-import { floorBaseAmount, legalBaseAmount, percentBase, type SizeRule } from "@/lib/order-size";
+import { floorBaseAmount, legalBaseAmount, percentBase, quoteTogglePrice, type SizeRule } from "@/lib/order-size";
 import { fallbackStrategy } from "@/lib/order-strategy";
-import { positionModeLabel, reducesOpen, resultingSize, sideOptions, type OpenBook } from "@/lib/trade-guards";
+import { positionModeLabel, reducingCap, reducesOpen, resultingSize, sideOptions, type OpenBook } from "@/lib/trade-guards";
 
 // ── Execution strategy options ──
 
@@ -65,6 +65,8 @@ interface Props {
   onApplyLeverage?: () => void;
   /** False while the position book is still loading, so Apply cannot use a stale draft. */
   positionsLoaded?: boolean;
+  /** True when the position query failed. Apply stays off so it cannot move an unread book. */
+  positionsFailed?: boolean;
   applyingLeverage?: boolean;
   /** True for the frame after a forced strategy change, so Create stays disabled. */
   onStrategyHold?: (held: boolean) => void;
@@ -97,6 +99,7 @@ export function OrderConfigPanel({
   onApplyLeverage,
   applyingLeverage = false,
   positionsLoaded = false,
+  positionsFailed = false,
   onStrategyHold,
   baseAvailable = null,
   quoteAvailable = null,
@@ -197,11 +200,16 @@ export function OrderConfigPanel({
             value={state.amount}
             field="amount"
             dispatch={dispatch}
-            currentPrice={currentPrice}
+            currentPrice={quoteTogglePrice(state.price, currentPrice, usesLimitPrice(state.execution_strategy))}
             step={sizeRule && sizeRule.increment > 0 ? sizeRule.increment : 0.001}
             baseSymbol={displayBase}
             quoteSymbol={displayQuote}
           />
+          {usesLimitPrice(state.execution_strategy) && state.price > 0 && (
+            <p className="mt-1 text-[10px] text-[var(--color-text-muted)]">
+              A quote amount uses this limit price, so the quote you type is the quote the order spends.
+            </p>
+          )}
           {sizeRule && sizeRule.minOrderSize > 0 && (
             <p className="mt-1 text-[10px] text-[var(--color-text-muted)]">
               Step {sizeRule.increment || sizeRule.minOrderSize} {displayBase}. Minimum {sizeRule.minOrderSize}.
@@ -268,6 +276,7 @@ export function OrderConfigPanel({
                 !onApplyLeverage ||
                 applyingLeverage ||
                 !positionsLoaded ||
+                positionsFailed ||
                 !(state.leverage >= 1) ||
                 !state.leverageTouched ||
                 (openBook != null && openBook.leverage == null) ||
@@ -309,6 +318,7 @@ export function OrderConfigPanel({
           connector={connector}
           sizeRule={sizeRule ?? null}
           baseSymbol={displayBase}
+          maxBase={reducingCap(openBook ?? null, state.position_action, state.side, positionMode)}
         />
       )}
 
