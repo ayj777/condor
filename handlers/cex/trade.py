@@ -127,7 +127,12 @@ async def load_position_mode(client, account, connector, trading_pair, cache):
     mode_result = await client.trading.get_position_mode(
         account_name=account, connector_name=connector
     )
-    position_mode = mode_result.get("position_mode", "HEDGE")
+    from condor.web.routes.positions import canonical_position_mode
+
+    raw = mode_result.get("position_mode")
+    if raw in (None, ""):
+        raw = mode_result.get("positionMode", "HEDGE")
+    position_mode = canonical_position_mode(raw) or "HEDGE"
     cache[_get_position_mode_cache_key(connector)] = position_mode
     lev_key = _get_leverage_cache_key(connector, trading_pair)
     if lev_key not in cache:

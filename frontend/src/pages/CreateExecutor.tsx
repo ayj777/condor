@@ -64,7 +64,7 @@ import {
 } from "@/lib/gridExecutor";
 import { formatConnectorName, formatPriceSig } from "@/lib/formatters";
 import { baseAmountError, legalBaseAmount } from "@/lib/order-size";
-import { applyReducing, claimInflight, ICEBERG_MARGIN_HOLD, icebergCreateHeld, ordersBlockCreate, positionModeBlocksCreate, reducingCap, type OpenBook } from "@/lib/trade-guards";
+import { applyHedge, applyReducing, canonicalPositionMode, claimInflight, ICEBERG_MARGIN_HOLD, icebergCreateHeld, isHedge, orderCap, ordersBlockCreate, positionModeBlocksCreate, type HedgeBooks, type OpenBook } from "@/lib/trade-guards";
 import { useViewFacts } from "@/lib/viewFacts";
 
 // ── Type tabs config ──
@@ -277,19 +277,26 @@ export function CreateExecutor() {
   if (executorType === "iceberg" && orderConfig.state.execution_strategy !== "RANGE_ICEBERG") {
     orderConfig.dispatch({ type: "SET_FIELD", field: "execution_strategy", value: "RANGE_ICEBERG" });
   }
-  const openBook = useMemo((): OpenBook | null => {
-    const live = mainPositions.filter((p) => Math.abs(p.amount) > 0);
-    const row = live.find((p) => p.source === "venue") ?? live[0];
-    if (!row) return null;
-    const name = (row.position_side || "").toUpperCase();
-    const side = name === "SHORT" || name === "SELL" ? "SHORT" : name === "LONG" || name === "BUY" ? "LONG" : "";
-    return {
-      amount: Math.abs(row.amount),
-      side,
-      leverage: row.leverage != null && row.leverage >= 1 ? row.leverage : null,
-      marginMode: row.margin_mode ?? null,
+  const hedgeBooks = useMemo((): HedgeBooks => {
+    const asBook = (row: (typeof mainPositions)[number]): OpenBook => {
+      const name = (row.position_side || "").toUpperCase();
+      const side = name === "SHORT" || name === "SELL" ? "SHORT" : name === "LONG" || name === "BUY" ? "LONG" : "";
+      return {
+        amount: Math.abs(row.amount),
+        side,
+        leverage: row.leverage != null && row.leverage >= 1 ? row.leverage : null,
+        marginMode: row.margin_mode ?? null,
+      };
     };
+    const live = mainPositions.filter((p) => Math.abs(p.amount) > 0);
+    const pick = (want: "LONG" | "SHORT") => {
+      const rows = live.filter((row) => asBook(row).side === want);
+      const row = rows.find((item) => item.source === "venue") ?? rows[0];
+      return row ? asBook(row) : null;
+    };
+    return { long: pick("LONG"), short: pick("SHORT") };
   }, [mainPositions]);
+  const openBook = hedgeBooks.long ?? hedgeBooks.short;
   const openLeverage = openBook?.leverage ?? null;
   const leverageSeeded = useRef("");
   // During render, so the first click already has the open leverage and Apply
@@ -714,12 +721,13 @@ export function CreateExecutor() {
 
       let payload: { executor_type: string; config: Record<string, unknown> };
 
-      const mode = positionModeQuery.data?.position_mode ?? "";
-      const cap = reducingCap(
+      const mode = canonicalPositionMode(positionModeQuery.data?.position_mode ?? "");
+      const cap = orderCap(
+        mode,
+        hedgeBooks,
         openBook,
         orderConfig.state.position_action,
         orderConfig.state.side,
-        mode,
       );
       switch (executorType) {
         case "grid":
@@ -748,12 +756,19 @@ export function CreateExecutor() {
       }
 
       if (executorType === "order" || executorType === "iceberg") {
-        const closeError = applyReducing(
-          payload.config,
-          openBook,
-          orderConfig.state.position_action,
-          positionModeQuery.data?.position_mode ?? "",
-        );
+        const closeError = isHedge(mode)
+          ? applyHedge(
+              payload.config,
+              hedgeBooks,
+              orderConfig.state.position_action,
+              orderConfig.state.side,
+            )
+          : applyReducing(
+              payload.config,
+              openBook,
+              orderConfig.state.position_action,
+              mode,
+            );
         if (closeError) throw new Error(closeError);
       }
       return api.createExecutor(server, payload);
@@ -1081,10 +1096,10 @@ export function CreateExecutor() {
                     <PositionConfigPanel state={positionConfig.state} dispatch={positionConfig.dispatch} validation={positionConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} />
                   )}
                   {executorType === "order" && (
-                    <OrderConfigPanel state={orderConfig.state} dispatch={orderConfig.dispatch} validation={orderConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} connector={connector} strategies={orderStrategies} marginModes={caps.marginModes} sizeRule={pairRule} positionLeverage={openLeverage} openBook={openBook} positionMode={positionModeQuery.data?.position_mode ?? ""} onApplyLeverage={() => leverageMutation.mutate()} applyingLeverage={leverageMutation.isPending} positionsLoaded={!isLoadingPositions} positionsFailed={isPositionsError} onStrategyHold={setStrategyHold} baseAvailable={balances.base} quoteAvailable={balances.quote} />
+                    <OrderConfigPanel state={orderConfig.state} dispatch={orderConfig.dispatch} validation={orderConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} connector={connector} strategies={orderStrategies} marginModes={caps.marginModes} sizeRule={pairRule} positionLeverage={openLeverage} openBook={openBook} positionMode={canonicalPositionMode(positionModeQuery.data?.position_mode ?? "")} onApplyLeverage={() => leverageMutation.mutate()} applyingLeverage={leverageMutation.isPending} positionsLoaded={!isLoadingPositions} positionsFailed={isPositionsError} onStrategyHold={setStrategyHold} baseAvailable={balances.base} quoteAvailable={balances.quote} books={hedgeBooks} />
                   )}
                   {executorType === "iceberg" && (
-                    <OrderConfigPanel state={orderConfig.state} dispatch={orderConfig.dispatch} validation={orderConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} connector={connector} strategies={orderStrategies} marginModes={caps.marginModes} sizeRule={pairRule} lockStrategy positionLeverage={openLeverage} openBook={openBook} positionMode={positionModeQuery.data?.position_mode ?? ""} onApplyLeverage={() => leverageMutation.mutate()} applyingLeverage={leverageMutation.isPending} positionsLoaded={!isLoadingPositions} positionsFailed={isPositionsError} baseAvailable={balances.base} quoteAvailable={balances.quote} />
+                    <OrderConfigPanel state={orderConfig.state} dispatch={orderConfig.dispatch} validation={orderConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} connector={connector} strategies={orderStrategies} marginModes={caps.marginModes} sizeRule={pairRule} lockStrategy positionLeverage={openLeverage} openBook={openBook} positionMode={canonicalPositionMode(positionModeQuery.data?.position_mode ?? "")} onApplyLeverage={() => leverageMutation.mutate()} applyingLeverage={leverageMutation.isPending} positionsLoaded={!isLoadingPositions} positionsFailed={isPositionsError} baseAvailable={balances.base} quoteAvailable={balances.quote} books={hedgeBooks} />
                   )}
                   {executorType === "dca" && (
                     <DCAConfigPanel state={dcaConfig.state} dispatch={dcaConfig.dispatch} validation={dcaConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} />

@@ -585,6 +585,44 @@ async def confirm_account_leverage(
     return {"status": "ok"}
 
 
+def _row_side(raw: object) -> str:
+    text = str(raw or "").strip()
+    if "." in text:
+        text = text.rsplit(".", 1)[-1]
+    text = text.upper()
+    if text in ("LONG", "BUY", "1"):
+        return "LONG"
+    if text in ("SHORT", "SELL", "2"):
+        return "SHORT"
+    return ""
+
+
+def executor_book_side(executor: dict) -> str:
+    """The position side this executor filled, not the other hedge side.
+
+    An explicit position side wins. Otherwise an open buy is a long and an
+    open sell is a short. A close sell reduces a long, and a close buy
+    reduces a short. Empty means the side could not be read.
+    """
+    config = executor.get("config") if isinstance(executor.get("config"), dict) else {}
+    explicit = _row_side(config.get("position_side") or executor.get("position_side"))
+    if explicit:
+        return explicit
+    action = str(
+        config.get("position_action") or executor.get("position_action") or "OPEN"
+    ).upper()
+    if "." in action:
+        action = action.rsplit(".", 1)[-1]
+    trade = _row_side(config.get("side") or executor.get("side"))
+    if action == "CLOSE":
+        if trade == "SHORT":
+            return "LONG"
+        if trade == "LONG":
+            return "SHORT"
+        return ""
+    return trade
+
+
 def _filled_base(executor: dict) -> float:
     info = (
         executor.get("custom_info")
@@ -641,6 +679,7 @@ async def _refuse_oversized_close(client, executor_id: str) -> None:
             detail="Cannot read the exchange position, so the stop will not close it.",
         ) from exc
     want = pair.replace("_", "-").upper()
+    side = executor_book_side(executor)
     venue = 0.0
     for row in rows:
         if not isinstance(row, dict):
@@ -648,17 +687,21 @@ async def _refuse_oversized_close(client, executor_id: str) -> None:
         row_pair = str(row.get("trading_pair") or "").replace("_", "-").upper()
         if want and row_pair != want:
             continue
+        row_side = _row_side(row.get("position_side") or row.get("side"))
+        if side and row_side != side:
+            continue
         try:
             amount = abs(float(row.get("amount") or 0))
         except (TypeError, ValueError):
             amount = 0.0
         venue = max(venue, amount)
     if venue > filled + 1e-9:
+        which = f" of the {side.lower()}" if side else ""
         raise HTTPException(
             status_code=400,
             detail=(
-                f"This stop would sell {venue:g} but the executor only filled {filled:g}. "
-                "Keep the position."
+                f"This stop would close {venue:g}{which} but the executor only "
+                f"filled {filled:g}. Keep the position."
             ),
         )
 

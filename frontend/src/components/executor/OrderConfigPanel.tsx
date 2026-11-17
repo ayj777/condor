@@ -17,7 +17,7 @@ import { usesLimitPrice, type OrderAction, type OrderState } from "./order-confi
 import { RangeIcebergFields } from "./RangeIcebergFields";
 import { floorBaseAmount, legalBaseAmount, percentBase, quoteTogglePrice, type SizeRule } from "@/lib/order-size";
 import { fallbackStrategy } from "@/lib/order-strategy";
-import { positionModeLabel, reducingCap, reducesOpen, resultingSize, sideOptions, type OpenBook } from "@/lib/trade-guards";
+import { bookForOrder, isHedge, isLongSide, orderCap, positionModeLabel, reducesOpen, resultingSize, sideOptions, type HedgeBooks, type OpenBook } from "@/lib/trade-guards";
 
 // ── Execution strategy options ──
 
@@ -61,6 +61,8 @@ interface Props {
   positionMode?: string;
   /** The open book, used to label a one-way sell and to show the size after this order. */
   openBook?: OpenBook | null;
+  /** Long and short books. Hedge open and close each use their own side. */
+  books?: HedgeBooks;
   /** Sets leverage on its own. Create does not call this. */
   onApplyLeverage?: () => void;
   /** False while the position book is still loading, so Apply cannot use a stale draft. */
@@ -96,6 +98,7 @@ export function OrderConfigPanel({
   positionLeverage = null,
   positionMode = "",
   openBook = null,
+  books = { long: null, short: null },
   onApplyLeverage,
   applyingLeverage = false,
   positionsLoaded = false,
@@ -168,6 +171,8 @@ export function OrderConfigPanel({
     dispatch({ type: "SET_FIELD", field: "amount", value: Number(stepped.toPrecision(8)) });
   };
   const snapped = sizeRule ? legalBaseAmount(state.amount, sizeRule) : state.amount;
+  const hedge = isHedge(positionMode);
+  const sizeBook = bookForOrder(positionMode, books, openBook, state.side);
   const belowMin =
     !!sizeRule &&
     sizeRule.minOrderSize > 0 &&
@@ -187,8 +192,8 @@ export function OrderConfigPanel({
         side={state.side}
         dispatch={dispatch}
         isSpot={isSpot}
-        longLabel={sideOptions(positionMode, openBook)[0]?.label}
-        shortLabel={sideOptions(positionMode, openBook)[1]?.label}
+        longLabel={sideOptions(positionMode, openBook, state.position_action)[0]?.label}
+        shortLabel={sideOptions(positionMode, openBook, state.position_action)[1]?.label}
       />
 
       {/* Order Config */}
@@ -218,15 +223,15 @@ export function OrderConfigPanel({
                 : ""}
             </p>
           )}
-          {openBook && openBook.amount > 0 && snapped > 0 && (
+          {snapped > 0 && (sizeBook?.amount || (hedge && state.position_action !== "CLOSE")) ? (
             <p className="mt-1 text-[10px] text-[var(--color-text-muted)]">
-              After this order the position is {resultingSize(
-                openBook.amount,
+              After this order the {hedge ? (isLongSide(state.side) ? "long" : "short") : "position"} is {resultingSize(
+                sizeBook?.amount ?? 0,
                 snapped,
-                state.position_action === "CLOSE" || reducesOpen(state.side, openBook, positionMode),
+                hedge ? state.position_action === "CLOSE" : state.position_action === "CLOSE" || reducesOpen(state.side, openBook, positionMode),
               )} {displayBase}.
             </p>
-          )}
+          ) : null}
           {belowMin && (
             <button
               type="button"
@@ -318,7 +323,7 @@ export function OrderConfigPanel({
           connector={connector}
           sizeRule={sizeRule ?? null}
           baseSymbol={displayBase}
-          maxBase={reducingCap(openBook ?? null, state.position_action, state.side, positionMode)}
+          maxBase={orderCap(positionMode, books, openBook ?? null, state.position_action, state.side)}
         />
       )}
 

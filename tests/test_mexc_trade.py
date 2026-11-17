@@ -931,6 +931,134 @@ def test_the_trade_screen_does_not_set_leverage_on_open():
     assert status == "unread"
 
 
+def test_mexc_position_mode_1_is_hedge_and_2_is_one_way():
+    from condor.web.routes.positions import canonical_position_mode
+
+    assert canonical_position_mode(1) == "HEDGE"
+    assert canonical_position_mode("1") == "HEDGE"
+    assert canonical_position_mode(2) == "ONEWAY"
+    assert canonical_position_mode("PositionMode.HEDGE") == "HEDGE"
+    assert canonical_position_mode("one-way") == "ONEWAY"
+    assert canonical_position_mode("PositionMode.ONEWAY") == "ONEWAY"
+    assert canonical_position_mode("") == ""
+
+
+def test_position_mode_route_reads_mexc_hedge_number(monkeypatch):
+    from fastapi import HTTPException
+
+    from condor.web.routes.positions import get_position_mode
+
+    class _Trading:
+        def __init__(self, payload):
+            self.payload = payload
+
+        async def get_position_mode(self, *_args, **_kwargs):
+            return self.payload
+
+    client = FakeClient()
+    client.trading = _Trading({"positionMode": 1})
+    monkeypatch.setattr(
+        "condor.web.routes.positions.get_config_manager", lambda: _CM(client)
+    )
+    result = asyncio.run(
+        get_position_mode(name="srv", connector="mexc_perpetual", user=_USER)
+    )
+    assert result == {"position_mode": "HEDGE"}
+
+    client.trading = _Trading({"data": {"position_mode": 2}})
+    result = asyncio.run(
+        get_position_mode(name="srv", connector="mexc_perpetual", user=_USER)
+    )
+    assert result == {"position_mode": "ONEWAY"}
+
+    client.trading = _Trading({"positionMode": 9})
+    with pytest.raises(HTTPException) as caught:
+        asyncio.run(
+            get_position_mode(name="srv", connector="mexc_perpetual", user=_USER)
+        )
+    assert caught.value.status_code == 502
+
+
+def test_a_hedge_stop_closes_only_the_filled_side(monkeypatch):
+    from fastapi import HTTPException
+
+    from condor.web.routes.executors import stop_executor_endpoint
+
+    stopped = []
+
+    class _Executors:
+        def __init__(self, filled, side, action="OPEN"):
+            self.filled = filled
+            self.side = side
+            self.action = action
+
+        async def get_executor(self, executor_id):
+            return {
+                "connector_name": "mexc_perpetual",
+                "trading_pair": "AIOT-USDT",
+                "custom_info": {"filled_amount": self.filled},
+                "config": {"side": self.side, "position_action": self.action},
+            }
+
+        async def stop_executor(self, executor_id, keep_position=False):
+            stopped.append((executor_id, keep_position))
+            return {"ok": True}
+
+    class _Trading:
+        def __init__(self, rows):
+            self.rows = rows
+
+        async def get_positions(self, **_kwargs):
+            return {"data": self.rows}
+
+    rows = [
+        {
+            "connector_name": "mexc_perpetual",
+            "trading_pair": "AIOT-USDT",
+            "position_side": "LONG",
+            "amount": 60770,
+        },
+        {
+            "connector_name": "mexc_perpetual",
+            "trading_pair": "AIOT-USDT",
+            "position_side": "SHORT",
+            "amount": 100,
+        },
+    ]
+    client = FakeClient()
+    client.executors = _Executors(100, "SELL")
+    client.trading = _Trading(rows)
+    monkeypatch.setattr(
+        "condor.web.routes.executors.get_config_manager", lambda: _CM(client)
+    )
+    asyncio.run(
+        stop_executor_endpoint(
+            name="srv", executor_id="ex-short", keep_position=False, user=_USER
+        )
+    )
+    assert stopped == [("ex-short", False)]
+
+    stopped.clear()
+    client.executors = _Executors(100, "SELL")
+    client.trading = _Trading(
+        [
+            rows[0],
+            {**rows[1], "amount": 500},
+        ]
+    )
+    with pytest.raises(HTTPException) as caught:
+        asyncio.run(
+            stop_executor_endpoint(
+                name="srv", executor_id="ex-short", keep_position=False, user=_USER
+            )
+        )
+    assert caught.value.status_code == 400
+    assert "500" in caught.value.detail
+    assert "short" in caught.value.detail
+    assert "60770" not in caught.value.detail
+    assert stopped == []
+
+
 def test_a_filled_mark_replaces_entry_notional():
     from condor.web.routes.positions import apply_mark_notional
 

@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { fallbackStrategy } from "./order-strategy";
 import { icebergSentSize, type RangeIcebergInput } from "./range-iceberg";
 import { quoteTogglePrice } from "./order-size";
-import { applyClose, applyReducing, claimInflight, defaultKeepPosition, icebergCreateHeld, ordersBlockCreate, positionModeBlocksCreate, resultingSize, rowsForPane, sideOptions } from "./trade-guards";
+import { applyClose, applyHedge, applyReducing, canonicalPositionMode, claimInflight, defaultKeepPosition, executorBookSide, icebergCreateHeld, isOneWay, orderCap, ordersBlockCreate, positionModeBlocksCreate, positionModeLabel, resultingSize, rowsForPane, sideOptions } from "./trade-guards";
 
 const input = (patch: Partial<RangeIcebergInput> = {}): RangeIcebergInput => ({
   side: "BUY",
@@ -124,6 +124,60 @@ describe("review guards", () => {
     expect(config.amount).toBe(60770);
     expect(resultingSize(60770, 1000, true)).toBe(59770);
     expect(resultingSize(60770, 1000, false)).toBe(61770);
+  });
+
+  it("opens a hedge short without touching the long, and closes the long explicitly", () => {
+    const books = {
+      long: { amount: 60770, side: "LONG" as const, leverage: 2, marginMode: null },
+      short: null,
+    };
+    expect(canonicalPositionMode(1)).toBe("HEDGE");
+    expect(canonicalPositionMode("1")).toBe("HEDGE");
+    expect(canonicalPositionMode(2)).toBe("ONEWAY");
+    expect(canonicalPositionMode("positionMode.2")).toBe("");
+    expect(positionModeLabel("1")).toBe("Hedge");
+    expect(positionModeLabel(1)).toBe("Hedge");
+    expect(isOneWay("1")).toBe(false);
+    expect(isOneWay("2")).toBe(true);
+    expect(sideOptions("HEDGE", books.long, "OPEN").map((item) => item.label)).toEqual([
+      "Open long",
+      "Open short",
+    ]);
+    expect(sideOptions("1", books.long, "CLOSE").map((item) => item.label)).toEqual([
+      "Close long",
+      "Close short",
+    ]);
+
+    const opened: Record<string, unknown> = { side: 2, amount: 1000, total_amount: 1000 };
+    expect(applyHedge(opened, books, "OPEN", 2)).toBeNull();
+    expect(opened.reduce_only).toBe(false);
+    expect(opened.position_action).toBe("OPEN");
+    expect(opened.position_side).toBe("SHORT");
+    expect(opened.amount).toBe(1000);
+    expect(orderCap("HEDGE", books, books.long, "OPEN", 2)).toBe(0);
+
+    const closed: Record<string, unknown> = { side: 1, amount: 100000, total_amount: 100000 };
+    expect(applyHedge(closed, books, "CLOSE", 1)).toBeNull();
+    expect(closed.reduce_only).toBe(true);
+    expect(closed.position_action).toBe("CLOSE");
+    expect(closed.position_side).toBe("LONG");
+    expect(closed.side).toBe(2);
+    expect(closed.amount).toBe(60770);
+    expect(closed.total_amount).toBe(60770);
+    expect(orderCap("HEDGE", books, books.long, "CLOSE", 1)).toBe(60770);
+    const iceberg: Record<string, unknown> = { side: "BUY", total_amount: 80000 };
+    expect(applyHedge(iceberg, books, "CLOSE", 1)).toBeNull();
+    expect(iceberg.side).toBe("SELL");
+    expect(iceberg.position_side).toBe("LONG");
+    expect(iceberg.reduce_only).toBe(true);
+    expect(iceberg.total_amount).toBe(60770);
+    expect(applyHedge({ side: "SELL", total_amount: 50 }, books, "CLOSE", 2)).toMatch(/short/i);
+  });
+
+  it("stops a hedge short against its own side", () => {
+    expect(executorBookSide({ side: "SELL", config: { position_action: "OPEN" } })).toBe("SHORT");
+    expect(executorBookSide({ config: { side: 2, position_action: "CLOSE" } })).toBe("LONG");
+    expect(executorBookSide({ config: { position_side: "LONG", side: "SELL" } })).toBe("LONG");
   });
 
   it("names a one-way sell and keeps a venue position by default", () => {

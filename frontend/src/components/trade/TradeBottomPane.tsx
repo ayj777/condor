@@ -18,19 +18,20 @@ import {
 } from "@/lib/formatters";
 import { childOrderIds, executorRunDetail, executorTypeLabel } from "@/lib/executor-run";
 import { stopKeepCopy } from "@/lib/executorStopCopy";
-import { defaultKeepPosition } from "@/lib/trade-guards";
+import { defaultKeepPosition, executorBookSide } from "@/lib/trade-guards";
 import { executorsQuery } from "@/lib/queryClient";
 import { TRADE_BOTTOM_PANE_KEY } from "@/lib/sessionState";
 
-function stopCloseLine(ex: ExecutorInfo | undefined, venueAmount: number): string {
+function stopCloseLine(ex: ExecutorInfo | undefined, venueAmount: number, side: string): string {
   const filled = Number(ex?.custom_info?.filled_amount);
   const filledOk = Number.isFinite(filled) && filled > 0;
+  const which = side === "LONG" ? "long" : side === "SHORT" ? "short" : "position";
   if (venueAmount > (filledOk ? filled : 0) + 1e-9) {
     const filledText = filledOk ? String(filled) : "0";
-    return `This stop will not sell. The exchange position is ${venueAmount} and this executor filled ${filledText}. Keep the position.`;
+    return `This stop will not close the ${which}. The exchange ${which} is ${venueAmount} and this executor filled ${filledText}. Keep the position.`;
   }
   const size = filledOk ? String(filled) : "only what it filled";
-  return `The executor stops and sells ${size} base. It will not sell more than it filled.`;
+  return `The executor stops and closes ${size} base on its own ${which}. It will not close more than it filled.`;
 }
 
 interface TradeBottomPaneProps {
@@ -377,6 +378,16 @@ export function TradeBottomPane({
     ), 0),
     [positions],
   );
+  const stopTarget = executors.find((ex) => ex.id === confirmStopId);
+  const stopSide = executorBookSide(stopTarget);
+  const stopVenueAmount = useMemo(() => {
+    if (!stopSide) return venueAmount;
+    return positions.reduce((max, pos) => {
+      if (pos.source !== "venue") return max;
+      if (executorBookSide({ position_side: pos.position_side }) !== stopSide) return max;
+      return Math.max(max, Math.abs(pos.amount));
+    }, 0);
+  }, [positions, stopSide, venueAmount]);
   const handleStop = useCallback((id: string) => {
     setKeepPosition(defaultKeepPosition(venueAmount));
     setConfirmStopId(id);
@@ -899,7 +910,7 @@ export function TradeBottomPane({
               <span className="text-xs text-[var(--color-text)]">{stopCopy.label}</span>
             </label>
             <p className="mt-1 ml-6 text-[11px] text-[var(--color-text-muted)]">
-              {keepPosition ? stopCopy.checked : stopCloseLine(executors.find((ex) => ex.id === confirmStopId), venueAmount)}
+              {keepPosition ? stopCopy.checked : stopCloseLine(executors.find((ex) => ex.id === confirmStopId), stopVenueAmount, stopSide)}
             </p>
             <div className="mt-3 flex justify-end gap-2">
               <button

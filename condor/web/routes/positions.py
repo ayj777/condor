@@ -200,6 +200,47 @@ def _normalize_position(pos: dict, source: str, source_name: str) -> dict:
     }
 
 
+def canonical_position_mode(value: object) -> str:
+    """HEDGE or ONEWAY.
+
+    MEXC ``positionMode`` uses 1 for hedge and 2 for one-way. A name
+    (``PositionMode.HEDGE``, ``one-way``) is read from its spelling. Anything
+    else is empty, so a hedge account is not shown as one-way.
+    """
+    if isinstance(value, bool) or value is None or value == "":
+        return ""
+    if isinstance(value, (int, float)) or (
+        isinstance(value, str) and str(value).strip().lstrip("-").isdigit()
+    ):
+        number = int(float(value))
+        if number == 1:
+            return "HEDGE"
+        if number == 2:
+            return "ONEWAY"
+        return ""
+    text = str(value).strip()
+    if "." in text:
+        text = text.rsplit(".", 1)[-1]
+    collapsed = text.replace("-", "").replace("_", "").replace(" ", "").upper()
+    if collapsed == "HEDGE":
+        return "HEDGE"
+    if collapsed == "ONEWAY":
+        return "ONEWAY"
+    return ""
+
+
+def _position_mode_raw(result: object) -> object:
+    if isinstance(result, dict):
+        data = result.get("data") if isinstance(result.get("data"), dict) else {}
+        for source in (result, data):
+            for key in ("position_mode", "positionMode", "mode"):
+                value = source.get(key)
+                if value not in (None, ""):
+                    return value
+        return ""
+    return result
+
+
 @router.get("/servers/{name}/trading/position-mode")
 async def get_position_mode(
     name: str,
@@ -223,14 +264,12 @@ async def get_position_mode(
         raise HTTPException(
             status_code=502, detail="Cannot read the account position mode."
         ) from exc
-    mode = ""
-    if isinstance(result, dict):
-        mode = str(result.get("position_mode") or result.get("mode") or "")
-    elif isinstance(result, str):
-        mode = result
-    if "." in mode:
-        mode = mode.rsplit(".", 1)[-1]
-    return {"position_mode": mode.upper()}
+    mode = canonical_position_mode(_position_mode_raw(result))
+    if not mode:
+        raise HTTPException(
+            status_code=502, detail="Cannot read the account position mode."
+        )
+    return {"position_mode": mode}
 
 
 @router.get("/servers/{name}/positions")

@@ -43,9 +43,60 @@ export function positionModeBlocksCreate(
   return executorType === "order" || executorType === "iceberg";
 }
 
+/** MEXC positionMode 1 is hedge and 2 is one-way. Names are read as spelled. */
+export function canonicalPositionMode(value: unknown): "" | "HEDGE" | "ONEWAY" {
+  if (value === 1 || value === "1") return "HEDGE";
+  if (value === 2 || value === "2") return "ONEWAY";
+  const text = String(value ?? "").trim();
+  const name = text.includes(".") ? text.slice(text.lastIndexOf(".") + 1) : text;
+  const collapsed = name.replace(/[-_\s]/g, "").toUpperCase();
+  if (collapsed === "HEDGE") return "HEDGE";
+  if (collapsed === "ONEWAY") return "ONEWAY";
+  return "";
+}
+
+export function isHedge(mode: string): boolean {
+  return canonicalPositionMode(mode) === "HEDGE";
+}
+
 export function isOneWay(mode: string): boolean {
-  const name = mode.toUpperCase();
-  return name === "ONEWAY" || name === "ONE_WAY";
+  return canonicalPositionMode(mode) === "ONEWAY";
+}
+
+export function isLongSide(side: unknown): boolean {
+  const text = String(side ?? "").toUpperCase();
+  return text === "1" || text === "BUY" || text === "LONG";
+}
+
+export interface HedgeBooks {
+  long: OpenBook | null;
+  short: OpenBook | null;
+}
+
+/** Hedge close uses the side the user chose. Anything else uses the single book. */
+export function bookForOrder(
+  mode: string,
+  books: HedgeBooks,
+  fallback: OpenBook | null,
+  side: unknown,
+): OpenBook | null {
+  if (!isHedge(mode)) return fallback;
+  return isLongSide(side) ? books.long : books.short;
+}
+
+export function orderCap(
+  mode: string,
+  books: HedgeBooks,
+  fallback: OpenBook | null,
+  action: string,
+  side: unknown,
+): number {
+  if (isHedge(mode)) {
+    if (action !== "CLOSE") return 0;
+    const book = bookForOrder(mode, books, fallback, side);
+    return book && book.amount > 0 ? book.amount : 0;
+  }
+  return reducingCap(fallback, action, side, mode);
 }
 
 /** A one-way sell against a long, or a buy against a short, reduces that book. */
@@ -69,6 +120,43 @@ export function reducingCap(
   if (!book || !(book.amount > 0)) return 0;
   if (action === "CLOSE" || reducesOpen(side, book, mode)) return book.amount;
   return 0;
+}
+
+/**
+ * Hedge open and close.
+ *
+ * Open short is its own position: not reduce-only, not capped by the long.
+ * Close long is explicit: reduce_only, position_side LONG, and never more
+ * than that long. Close short is the same on the short.
+ */
+export function applyHedge(
+  config: Record<string, unknown>,
+  books: HedgeBooks,
+  action: string,
+  side: unknown,
+): string | null {
+  const wantLong = isLongSide(side);
+  const positionSide = wantLong ? "LONG" : "SHORT";
+  config.position_side = positionSide;
+  if (action !== "CLOSE") {
+    config.position_action = "OPEN";
+    config.reduce_only = false;
+    return null;
+  }
+  const book = wantLong ? books.long : books.short;
+  if (!book || !(book.amount > 0)) {
+    return wantLong ? "No open long to close" : "No open short to close";
+  }
+  config.position_action = "CLOSE";
+  config.reduce_only = true;
+  const trade = String(config.side ?? "").toUpperCase();
+  const word = trade === "BUY" || trade === "SELL";
+  config.side = word ? (wantLong ? "SELL" : "BUY") : wantLong ? 2 : 1;
+  for (const key of ["amount", "total_amount"] as const) {
+    const value = config[key];
+    if (typeof value === "number" && value > book.amount) config[key] = book.amount;
+  }
+  return null;
 }
 
 /** Close, or a one-way order that reduces the open book, is reduce-only and capped. */
@@ -115,16 +203,32 @@ export function applyClose(
   return null;
 }
 
-export function positionModeLabel(mode: string): string {
-  const name = mode.toUpperCase();
-  if (name === "ONEWAY" || name === "ONE_WAY") return "One-way";
+export function positionModeLabel(mode: unknown): string {
+  const name = canonicalPositionMode(mode);
+  if (name === "ONEWAY") return "One-way";
   if (name === "HEDGE") return "Hedge";
   return "";
 }
 
-/** On one-way, a sell against a long reduces it. The label says so. */
-export function sideOptions(mode: string, book: OpenBook | null): { value: string; label: string }[] {
-  const oneWay = mode.toUpperCase() === "ONEWAY" || mode.toUpperCase() === "ONE_WAY";
+/** On one-way, a sell against a long reduces it. Hedge names each open and close. */
+export function sideOptions(
+  mode: string,
+  book: OpenBook | null,
+  action = "OPEN",
+): { value: string; label: string }[] {
+  if (isHedge(mode)) {
+    if (action === "CLOSE") {
+      return [
+        { value: "LONG", label: "Close long" },
+        { value: "SHORT", label: "Close short" },
+      ];
+    }
+    return [
+      { value: "LONG", label: "Open long" },
+      { value: "SHORT", label: "Open short" },
+    ];
+  }
+  const oneWay = isOneWay(mode);
   if (!oneWay) {
     return [
       { value: "LONG", label: "Long" },
@@ -199,6 +303,35 @@ export function claimInflight(lock: { current: boolean }): boolean {
   if (lock.current) return false;
   lock.current = true;
   return true;
+}
+
+/** The position side an executor filled. Empty when the row does not say. */
+export function executorBookSide(ex: {
+  side?: string;
+  position_side?: string;
+  position_action?: string;
+  config?: Record<string, unknown>;
+} | null | undefined): "LONG" | "SHORT" | "" {
+  if (!ex) return "";
+  const config = ex.config ?? {};
+  const named = canonicalSide(config.position_side ?? ex.position_side);
+  if (named) return named;
+  const action = String(config.position_action ?? ex.position_action ?? "OPEN").toUpperCase();
+  const trade = canonicalSide(config.side ?? ex.side);
+  if (action.endsWith("CLOSE")) {
+    if (trade === "SHORT") return "LONG";
+    if (trade === "LONG") return "SHORT";
+    return "";
+  }
+  return trade;
+}
+
+function canonicalSide(raw: unknown): "LONG" | "SHORT" | "" {
+  const text = String(raw ?? "").toUpperCase();
+  const name = text.includes(".") ? text.slice(text.lastIndexOf(".") + 1) : text;
+  if (name === "LONG" || name === "BUY" || name === "1") return "LONG";
+  if (name === "SHORT" || name === "SELL" || name === "2") return "SHORT";
+  return "";
 }
 
 /** The stop dialog keeps the position when the venue already has one. */
