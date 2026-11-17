@@ -92,6 +92,7 @@ import {
   emptyScopeNode,
   foldLeaves,
   indexTree,
+  executorTypeBubble,
   leafFromExecutor,
   leafFromTerminatedController,
   matchesGrain,
@@ -106,6 +107,7 @@ import {
   type Population,
   type PerfLeaf,
 } from "@/lib/perf-tree";
+import { displayedExecutorType } from "@/lib/executor-run";
 import { botsByController, quoteConverter, runningLeaves } from "@/lib/perf-population";
 import {
   collapseGrouping,
@@ -1061,7 +1063,7 @@ export function PerfBrowser({
         // ticks are kept, not cleared, so going back to `Both` restores them.
         if (execTypes.length && grain !== "controllers") {
           if (leaf.kind === "controller") return false;
-          if (!execTypes.includes(leaf.executorType)) return false;
+          if (!execTypes.includes(executorTypeBubble(leaf))) return false;
         }
         return true;
       });
@@ -1108,7 +1110,7 @@ export function PerfBrowser({
       // side whose classes upstream never reported.
       ctrlTypes: alpha(tally((leaf) => (leaf.kind === "controller" ? classOf(leaf) : ""), rawLeaves)),
       execTypes: alpha(
-        tally((leaf) => (leaf.kind === "executor" ? leaf.executorType : ""), rawLeaves),
+        tally((leaf) => executorTypeBubble(leaf), rawLeaves),
       ),
       // Every leaf, controller and executor alike: the question is "whose is
       // this", and a leaf's owner is a fact about it rather than about its
@@ -2234,7 +2236,7 @@ export function PerfBrowser({
     const subject = activeCtrl
       ? `controller "${activeCtrl.controller_name || activeCtrl.controller_id}" (${activeCtrl.trading_pair}) of bot ${activeCtrl.bot_name}`
       : activeExec
-        ? `executor ${activeExec.id} (${activeExec.type}, ${activeExec.trading_pair})`
+        ? `executor ${activeExec.id} (${displayedExecutorType(activeExec)}, ${activeExec.trading_pair})`
         : activeRun
           ? `the finished run of bot ${activeRun.bot_name}`
           : scopeAgentKey && scope.kind === "agent"
@@ -2696,7 +2698,7 @@ export function PerfBrowser({
                     {activeExec.id.slice(0, 14)}…
                   </h2>
                   <span className="text-[10px] text-[var(--color-text-muted)] block truncate">
-                    {activeExec.type}
+                    {displayedExecutorType(activeExec)}
                     {activeExec.controller_id ? ` · ${activeExec.controller_id}` : ""}
                   </span>
                 </div>

@@ -87,7 +87,8 @@ describe("executor row focus", () => {
     });
 
     const open = card();
-    expect(open?.textContent).toContain("Range iceberg");
+    expect(open?.textContent).toContain("Limit iceberg");
+    expect(open?.textContent).not.toContain("Range iceberg");
     expect(open?.textContent).toContain("Up to");
     expect(open?.textContent).toContain("OPEN");
     expect(open?.textContent).not.toContain("ISOLATED");

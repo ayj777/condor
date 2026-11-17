@@ -23,6 +23,7 @@ import {
   botOfNodeId,
   buildTree,
   controllerClassOf,
+  executorTypeBubble,
   controllerNodeId,
   countNodes,
   foldLeaves,
@@ -156,6 +157,24 @@ describe("leaf adapters", () => {
   // the reported field empty on more rows than it looks — a terminated
   // controller rebuilt from a run, for one — and the deployed config always
   // declares the pair, because that is the field the deploy was written against.
+  it("labels an up-to iceberg in the type filter and keeps the executor type", () => {
+    const up = leafFromExecutor(executor({
+      type: "range_iceberg_executor",
+      config: { mode: "UP_TO" },
+    }));
+    const range = leafFromExecutor(executor({
+      type: "range_iceberg_executor",
+      custom_info: { mode: "RANGE" },
+    }));
+    expect(up.executorType).toBe("range_iceberg_executor");
+    expect(range.executorType).toBe("range_iceberg_executor");
+    expect(up.typeLabel).toBe("Limit iceberg");
+    expect(range.typeLabel).toBe("Range iceberg");
+    expect(executorTypeBubble(up)).toBe("Limit iceberg");
+    expect(executorTypeBubble(range)).toBe("Range iceberg");
+    expect(executorTypeBubble(leafFromExecutor(executor()))).toBe("position_executor");
+  });
+
   it("takes the pair from the deployed config when the record reports none", () => {
     expect(leafFromController(controller({ trading_pair: "" })).pair).toBe("");
     expect(

@@ -22,6 +22,7 @@ import type {
   ArchivedControllerRollup,
   ArchivedExecutor,
 } from "@/lib/api";
+import { displayedExecutorType } from "@/lib/executor-run";
 import { formatCurrencyPnl, formatCurrencyVolume, pnlTextClass } from "@/lib/formatters";
 
 /**
@@ -222,7 +223,7 @@ function ExecutorTable({
                     className="border-b border-[var(--color-border)]/50 hover:bg-[var(--color-surface-hover)]"
                   >
                     <td className="px-3 py-1.5 font-mono">{ex.id.slice(0, 8)}</td>
-                    <td className="px-3 py-1.5">{ex.type || "—"}</td>
+                    <td className="px-3 py-1.5">{displayedExecutorType(ex)}</td>
                     <td className="px-3 py-1.5">{ex.trading_pair || "—"}</td>
                     <td className={`px-3 py-1.5 ${sideColor}`}>{ex.side || "—"}</td>
                     <td className="px-3 py-1.5">{ex.close_type || "—"}</td>

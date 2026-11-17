@@ -5,8 +5,7 @@ import { agentBucketLabel } from "@/components/perf/agentFilter";
 import { DEED_TITLE, provenanceOf, type FleetOwner } from "@/lib/agent-attribution";
 import { agentColor } from "@/lib/agentColor";
 import { formatCurrencyPnl, formatCurrencyVolume, pnlColor, shortBotName } from "@/lib/formatters";
-import type { ConvertQuote, PerfNode } from "@/lib/perf-tree";
-import { agentOfNodeId, foldLeaves, TOP_LEVEL_KINDS } from "@/lib/perf-tree";
+import { agentOfNodeId, executorTypeBubble, foldLeaves, TOP_LEVEL_KINDS, type ConvertQuote, type PerfNode } from "@/lib/perf-tree";
 
 /**
  * The status marker, at one size for every row.
@@ -135,7 +134,7 @@ function subtitle(node: PerfNode, showBot: boolean): string {
         .join(" · ");
     }
     case "executor":
-      return [node.leaves[0]?.executorType, node.leaves[0]?.pair].filter(Boolean).join(" · ");
+      return [node.leaves[0] ? executorTypeBubble(node.leaves[0]) : "", node.leaves[0]?.pair].filter(Boolean).join(" · ");
   }
 }
 

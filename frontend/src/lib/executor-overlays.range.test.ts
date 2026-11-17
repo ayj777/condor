@@ -51,6 +51,8 @@ describe("range iceberg on the chart and the bottom pane", () => {
       formatValue: (n) => String(n),
       formatPnl: (n) => String(n),
     });
+    expect(html).toContain("Range iceberg");
+    expect(html).not.toContain("RANGE_ICEBERG");
     expect(html).toContain("unknown_order_halt: abc");
     expect(html).toContain("20 / 100");
   });
@@ -62,8 +64,21 @@ describe("range iceberg on the chart and the bottom pane", () => {
         config: { mode: "UP_TO", limit_price: 0.08137 },
       }),
     );
+    expect(overlay.type).toBe("range_iceberg");
+    expect(overlay.typeLabel).toBe("Limit iceberg");
     expect(overlay.gridBox).toBeUndefined();
     expect(overlay.priceLines[0]?.price).toBe(0.08137);
+    expect(overlay.priceLines[0]?.label).toBe("Limit iceberg");
+    const html = renderOverlayTooltipHtml(overlay, {
+      formatValue: (n) => String(n),
+      formatPnl: (n) => String(n),
+    });
+    expect(html).toContain("Limit iceberg");
+    expect(html).not.toContain("Range iceberg");
+    expect(executorTypeLabel(executor({
+      custom_info: { mode: "up to" },
+      config: { mode: "RANGE" },
+    }))).toBe("Limit iceberg");
   });
 
   it("labels the row and offers resume while the halt is set", () => {

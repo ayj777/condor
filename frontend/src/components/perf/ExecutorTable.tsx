@@ -15,6 +15,7 @@ import { PairLabel } from "@/components/executor/PairLabel";
 import { ExecutorHoverRow } from "@/components/trade/ExecutorDetailPopup";
 import { useResizeDrag } from "@/hooks/useResizeDrag";
 import { type ExecutorInfo } from "@/lib/api";
+import { displayedExecutorType } from "@/lib/executor-run";
 import {
   formatUsd,
   formatVolume,
@@ -176,7 +177,7 @@ const ExecutorRow = memo(function ExecutorRow({
       </td>
       <td className="px-4 py-2.5">
         <span className="rounded bg-[var(--color-surface)] px-2 py-0.5 text-xs font-medium border border-[var(--color-border)]/50">
-          {ex.type}
+          {displayedExecutorType(ex)}
         </span>
       </td>
       <td className="px-4 py-2.5 text-sm text-[var(--color-text-muted)]">
@@ -497,7 +498,7 @@ export function DetailPanel({
               <span className="capitalize">{executor.status}</span>
             </div>
             <span className="rounded bg-[var(--color-surface)] px-2 py-0.5 text-xs font-medium border border-[var(--color-border)]/50">
-              {executor.type}
+              {displayedExecutorType(executor)}
             </span>
             <span className="text-[var(--color-text-muted)]">{executor.connector}</span>
             <PairLabel tradingPair={executor.trading_pair} connector={executor.connector} />

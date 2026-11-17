@@ -15,6 +15,7 @@ import { agentBucket, BEFORE_LEDGER, OUTSIDE } from "@/components/perf/agentFilt
 import type { DeedIndex, Provenance } from "@/lib/agent-attribution";
 import type { BotRunInfo, ControllerInfo, ExecutorInfo } from "@/lib/api";
 import { controllerKey } from "@/lib/controller-identity";
+import { executorTypeLabel } from "@/lib/executor-run";
 import { isExecutorActive, toMs } from "@/lib/formatters";
 
 /** Which set of records is in scope: what is live, or what has finished. */
@@ -116,6 +117,11 @@ export interface PerfLeaf {
    * groups rather than one list that half the population can never match.
    */
   executorType: string;
+  /**
+   * The name a type filter and a tree row show, when it is not the raw type.
+   * An up-to range iceberg is "Limit iceberg". The executor type stays put.
+   */
+  typeLabel?: string;
   connector: string;
   pair: string;
   /** Quote-denominated. `net` is the leaf's own total, not `realized + unrealized`. */
@@ -315,6 +321,8 @@ export function leafFromExecutor(
   const running = isExecutorActive(e.status);
   const closedAt = e.close_timestamp > 0 ? toMs(e.close_timestamp) : null;
   const attached = !!bot && bot !== UNATTACHED_BOT;
+  const rawType = e.type || UNKNOWN_LABEL;
+  const typeLabel = rawType.toLowerCase().includes("range_iceberg") ? executorTypeLabel(e) : undefined;
   return {
     id: e.id,
     kind: "executor",
@@ -323,7 +331,8 @@ export function leafFromExecutor(
     agent,
     how,
     controllerId: attached ? e.controller_id || "" : "",
-    executorType: e.type || UNKNOWN_LABEL,
+    executorType: rawType,
+    typeLabel,
     connector: e.connector || "",
     pair: pairOf(e),
     realized: running ? 0 : e.pnl,
@@ -383,6 +392,12 @@ export function runStatus(r: BotRunInfo): string {
  * Returning `""` for both is what keeps them out of the options *and* out of
  * the counts, since the tally that builds the bubbles skips empty keys.
  */
+/** The executor-type bubble this leaf belongs to. Controllers are not in that row. */
+export function executorTypeBubble(leaf: PerfLeaf): string {
+  if (leaf.kind !== "executor") return "";
+  return leaf.typeLabel || leaf.executorType;
+}
+
 export function controllerClassOf(leaf: PerfLeaf, classById: Map<string, string>): string {
   if (leaf.kind === "controller") {
     return leaf.executorType === UNKNOWN_LABEL ? "" : leaf.executorType;
