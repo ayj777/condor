@@ -64,11 +64,66 @@ export function percentBase(
   return floorBaseAmount((spendable * pct * leverage) / price, increment);
 }
 
+/**
+ * The step a base size must land on.
+ *
+ * A known contract size wins when it is coarser than the base increment, so a
+ * typed size is a whole number of contracts before it is sent. The connector
+ * still turns that base size into contracts.
+ */
+export function orderStep(rule: SizeRule | null | undefined): number {
+  const contract = rule?.contractSize ?? 0;
+  const increment = rule?.increment ?? 0;
+  if (contract > 0 && increment > 0) return Math.max(contract, increment);
+  return contract > 0 ? contract : increment;
+}
+
 /** The base amount a create will submit. Floored to the step, never rounded up. */
 export function legalBaseAmount(amount: number, rule: SizeRule | null | undefined): number {
   if (!(amount > 0)) return 0;
-  if (!rule || !(rule.increment > 0)) return amount;
-  return floorBaseAmount(amount, rule.increment);
+  const step = orderStep(rule);
+  if (!(step > 0)) return amount;
+  return floorBaseAmount(amount, step);
+}
+
+/** `30,000` for a token amount. Grouping is the only decoration. */
+export function formatTokenAmount(amount: number): string {
+  if (!Number.isFinite(amount)) return "";
+  return amount.toLocaleString("en-US", { maximumFractionDigits: 8 });
+}
+
+/** Shown when the size that will be sent is smaller than the size that was typed. */
+export function roundDownNote(typed: number, sent: number, symbol: string): string | null {
+  if (!(sent > 0) || !(typed > sent + 1e-9) || !symbol) return null;
+  return `Rounded down to ${formatTokenAmount(sent)} ${symbol}.`;
+}
+
+/** The two tickers on `AIOT-USDT`. Empty when that half of the pair is missing. */
+export function pairTokens(pair: string | null | undefined): { base: string; quote: string } {
+  const [base, quote] = (pair || "").split("-");
+  return { base: base || "", quote: quote || "" };
+}
+
+/**
+ * The token a stored size unit names.
+ *
+ * `BASE` and a leftover `CONTRACTS` row use the base ticker. `QUOTE` uses the
+ * quote ticker. The words themselves are not shown.
+ */
+export function sizeUnitSymbol(unit: string, pair: string | null | undefined): string {
+  const { base, quote } = pairTokens(pair);
+  const key = unit.replace(/[\s._-]/g, "").toUpperCase();
+  if (quote && (key === "QUOTE" || key === quote.toUpperCase())) return quote;
+  if (base && (key === "BASE" || key === "CONTRACTS" || key === base.toUpperCase() || key === "")) return base;
+  return quote || base;
+}
+
+/** The size-unit choices a form may offer: the pair's own tickers, nothing else. */
+export function sizeUnitChoices(base: string, quote: string): { value: "BASE" | "QUOTE"; label: string }[] {
+  return [
+    { value: "BASE", label: base },
+    { value: "QUOTE", label: quote },
+  ];
 }
 
 /** Nearest tick. An absent increment leaves the price unchanged. */
@@ -90,7 +145,7 @@ export function baseAmountError(
   rule: SizeRule | null | undefined,
   baseSymbol: string,
 ): string | null {
-  if (!(amount > 0)) return "Amount required (base currency)";
+  if (!(amount > 0)) return "Amount required";
   if (!rule) return null;
   const snapped = legalBaseAmount(amount, rule);
   const min = rule.minOrderSize > 0 ? rule.minOrderSize : 0;

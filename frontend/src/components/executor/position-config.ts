@@ -127,7 +127,7 @@ export function positionReducer(state: PositionState, action: PositionAction): P
 export function usePositionValidation(state: PositionState): ExecutorValidation {
   return useMemo(() => {
     const errors: string[] = [];
-    if (state.amount <= 0) errors.push("Amount required (base currency)");
+    if (state.amount <= 0) errors.push("Amount required");
     if (state.stop_loss === 0 && state.take_profit === 0 && state.time_limit === 0) {
       errors.push("Set at least one exit: SL, TP, or time limit");
     }

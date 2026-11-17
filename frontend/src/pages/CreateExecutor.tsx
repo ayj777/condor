@@ -268,7 +268,7 @@ export function CreateExecutor() {
       orderTypes: rule.supported_order_types ?? [],
     };
   }, [rulesData, pair]);
-  const baseSymbol = pair?.split("-")[0] || "base";
+  const baseSymbol = pair?.split("-")[0] || "";
   // After the rule: the amount check and the snapped size both read it, and a
   // hook above this line would close over a rule from the previous pair.
   const orderConfig = useOrderConfig(pairRule, baseSymbol);
@@ -1122,7 +1122,7 @@ export function CreateExecutor() {
                     <GridConfigPanel state={gridState} dispatch={gridDispatch} currentPrice={currentPrice} isSpot={isSpot} quoteCurrency={pair?.split("-")[1] || "USDT"} />
                   )}
                   {executorType === "position" && (
-                    <PositionConfigPanel state={positionConfig.state} dispatch={positionConfig.dispatch} validation={positionConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} />
+                    <PositionConfigPanel state={positionConfig.state} dispatch={positionConfig.dispatch} validation={positionConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} sizeRule={pairRule} />
                   )}
                   {executorType === "order" && (
                     <OrderConfigPanel state={orderConfig.state} dispatch={orderConfig.dispatch} validation={orderConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} connector={connector} strategies={orderStrategies} marginModes={caps.marginModes} sizeRule={pairRule} positionLeverage={openLeverage} openBook={openBook} positionMode={canonicalPositionMode(positionModeQuery.data?.position_mode ?? "")} onApplyLeverage={() => leverageMutation.mutate()} applyingLeverage={leverageMutation.isPending} positionsLoaded={!isLoadingPositions} positionsFailed={isPositionsError} onStrategyHold={setStrategyHold} baseAvailable={balances.base} quoteAvailable={balances.quote} books={hedgeBooks} />

@@ -1,4 +1,4 @@
-import { floorBaseAmount, type SizeRule } from "./order-size";
+import { floorBaseAmount, orderStep, type SizeRule } from "./order-size";
 
 /**
  * Client-side twin of `RangeIcebergExecutorConfig`.
@@ -220,7 +220,7 @@ export function icebergSentSize(
   } else if (maxBase > 0 && baseTotal > maxBase) {
     baseTotal = maxBase;
   }
-  const step = input.sizeUnit === "CONTRACTS" ? 1 : rule?.increment ?? 0;
+  const step = input.sizeUnit === "CONTRACTS" ? 1 : orderStep(rule);
   const min = input.sizeUnit === "CONTRACTS" ? 1 : rule?.minOrderSize ?? 0;
   if (!(step > 0)) {
     if (input.sizeUnit === "QUOTE") {

@@ -15,7 +15,7 @@ import {
 import type { ExecutorValidation } from "./types";
 import { usesLimitPrice, type OrderAction, type OrderState } from "./order-config";
 import { RangeIcebergFields } from "./RangeIcebergFields";
-import { floorBaseAmount, legalBaseAmount, percentBase, quoteTogglePrice, type SizeRule } from "@/lib/order-size";
+import { floorBaseAmount, formatTokenAmount, legalBaseAmount, orderStep, percentBase, quoteTogglePrice, roundDownNote, type SizeRule } from "@/lib/order-size";
 import { fallbackStrategy } from "@/lib/order-strategy";
 import { bookForOrder, isHedge, isLongSide, orderCap, positionModeLabel, reducesOpen, resultingSize, sideOptions, type HedgeBooks, type OpenBook } from "@/lib/trade-guards";
 
@@ -109,8 +109,8 @@ export function OrderConfigPanel({
   baseSymbol,
   quoteSymbol,
 }: Props) {
-  const displayBase = baseSymbol || pair?.split("-")[0] || "base";
-  const displayQuote = quoteSymbol || pair?.split("-")[1] || "quote";
+  const displayBase = baseSymbol || pair?.split("-")[0] || "";
+  const displayQuote = quoteSymbol || pair?.split("-")[1] || "";
   const options = strategies
     ? STRATEGY_OPTIONS.filter((o) => strategies.includes(o.value))
     : STRATEGY_OPTIONS;
@@ -171,6 +171,7 @@ export function OrderConfigPanel({
     dispatch({ type: "SET_FIELD", field: "amount", value: Number(stepped.toPrecision(8)) });
   };
   const snapped = sizeRule ? legalBaseAmount(state.amount, sizeRule) : state.amount;
+  const rounded = roundDownNote(state.amount, snapped, displayBase);
   const hedge = isHedge(positionMode);
   const sizeBook = bookForOrder(positionMode, books, openBook, state.side);
   const belowMin =
@@ -217,11 +218,11 @@ export function OrderConfigPanel({
           )}
           {sizeRule && sizeRule.minOrderSize > 0 && (
             <p className="mt-1 text-[10px] text-[var(--color-text-muted)]">
-              Step {sizeRule.increment || sizeRule.minOrderSize} {displayBase}. Minimum {sizeRule.minOrderSize}.
-              {state.amount > 0 && snapped !== state.amount && snapped >= sizeRule.minOrderSize
-                ? ` This order sends ${snapped}.`
-                : ""}
+              Step {formatTokenAmount(orderStep(sizeRule) || sizeRule.minOrderSize)}{displayBase ? ` ${displayBase}` : ""}. Minimum {formatTokenAmount(sizeRule.minOrderSize)}.
             </p>
+          )}
+          {rounded && (
+            <p className="mt-1 text-[10px] text-[var(--color-text-muted)]">{rounded}</p>
           )}
           {snapped > 0 && (sizeBook?.amount || (hedge && state.position_action !== "CLOSE")) ? (
             <p className="mt-1 text-[10px] text-[var(--color-text-muted)]">
@@ -323,6 +324,7 @@ export function OrderConfigPanel({
           connector={connector}
           sizeRule={sizeRule ?? null}
           baseSymbol={displayBase}
+          quoteSymbol={displayQuote}
           maxBase={orderCap(positionMode, books, openBook ?? null, state.position_action, state.side)}
         />
       )}

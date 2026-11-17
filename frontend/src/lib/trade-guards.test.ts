@@ -187,6 +187,18 @@ describe("review guards", () => {
     expect(defaultKeepPosition(0)).toBe(false);
   });
 
+  it("rounds a base iceberg down to a whole contract", () => {
+    const sent = icebergSentSize(
+      input({ totalAmount: 25, levels: 1, duration: "", scheduleSlices: 0 }),
+      { minOrderSize: 10, increment: 1, contractSize: 10 },
+      0,
+      false,
+    );
+    expect(sent.error).toBeNull();
+    expect(sent.sizeUnit).toBe("BASE");
+    expect(sent.total).toBe(20);
+  });
+
   it("sends a quote iceberg as floored base", () => {
     const sent = icebergSentSize(
       input({ sizeUnit: "QUOTE", totalAmount: 80, levels: 2, priceLow: 0.08, priceHigh: 0.08 }),

@@ -40,7 +40,7 @@ export interface OrderState {
   // Range iceberg. Prices are not persisted: they belong to the market that is open.
   ri_mode: "RANGE" | "UP_TO";
   ri_total_amount: number;
-  ri_size_unit: "BASE" | "QUOTE" | "CONTRACTS";
+  ri_size_unit: "BASE" | "QUOTE";
   ri_price_low: number;
   ri_price_high: number;
   ri_limit_price: number;
@@ -138,7 +138,9 @@ const PERSISTED_FIELDS: (keyof OrderState)[] = [
 ];
 
 function loadSavedDefaults(): OrderState {
-  return loadPersistedDefaults(STORAGE_KEY, ORDER_DEFAULTS, PERSISTED_FIELDS);
+  const loaded = loadPersistedDefaults(STORAGE_KEY, ORDER_DEFAULTS, PERSISTED_FIELDS);
+  if (loaded.ri_size_unit !== "QUOTE") loaded.ri_size_unit = "BASE";
+  return loaded;
 }
 
 function saveDefaults(state: OrderState) {
@@ -173,7 +175,7 @@ export function orderReducer(state: OrderState, action: OrderAction): OrderState
       if (action.field === "ri_size_unit") {
         return {
           ...state,
-          ri_size_unit: action.value as OrderState["ri_size_unit"],
+          ri_size_unit: action.value === "QUOTE" ? "QUOTE" : "BASE",
           ri_contracts_confirmed: false,
         };
       }
@@ -273,7 +275,7 @@ export function rangeIcebergInput(state: OrderState): RangeIcebergInput {
 export function useOrderValidation(
   state: OrderState,
   sizeRule: SizeRule | null = null,
-  baseSymbol = "base",
+  baseSymbol = "",
 ): ExecutorValidation {
   return useMemo(() => {
     if (state.leverage < 1) {
@@ -316,7 +318,7 @@ function baseAmountMessage(
   rule: SizeRule | null,
   baseSymbol: string,
 ): string | null {
-  if (!(amount > 0)) return "Amount required (base currency)";
+  if (!(amount > 0)) return "Amount required";
   if (!rule || !(rule.minOrderSize > 0)) return null;
   const snapped = legalBaseAmount(amount, rule);
   if (snapped < rule.minOrderSize) {
@@ -327,7 +329,7 @@ function baseAmountMessage(
 
 // ── Hook ──
 
-export function useOrderConfig(sizeRule: SizeRule | null = null, baseSymbol = "base") {
+export function useOrderConfig(sizeRule: SizeRule | null = null, baseSymbol = "") {
   const [state, dispatch] = useReducer(orderReducer, undefined, loadSavedDefaults);
   const priceIncrement = sizeRule?.priceIncrement ?? 0;
   useEffect(() => {

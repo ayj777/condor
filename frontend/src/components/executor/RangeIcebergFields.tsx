@@ -1,6 +1,6 @@
 import { useState } from "react";
 
-import type { SizeRule } from "@/lib/order-size";
+import { formatTokenAmount, orderStep, roundDownNote, sizeUnitChoices, type SizeRule } from "@/lib/order-size";
 import { formatInterval, icebergSentSize, rangeIcebergPreview } from "@/lib/range-iceberg";
 import { rangeIcebergInput, type OrderAction, type OrderState } from "./order-config";
 import { NumberField, PriceField, SectionHeader, SelectField } from "./fields";
@@ -8,18 +8,13 @@ import { NumberField, PriceField, SectionHeader, SelectField } from "./fields";
 /**
  * The range iceberg executor's fields, in the order the config declares them.
  *
- * Amounts are in the selected size unit. On MEXC a BASE amount is converted
- * by the contract size (AIOT-USDT is 10), so the form does not divide by it.
+ * Amounts are in the pair's base or quote token. A size that is not a whole
+ * number of contracts is rounded down before it is sent.
  */
 
 const MODE_OPTIONS = [
   { value: "RANGE", label: "Range" },
   { value: "UP_TO", label: "Up to" },
-];
-const UNIT_OPTIONS = [
-  { value: "BASE", label: "Base" },
-  { value: "QUOTE", label: "Quote" },
-  { value: "CONTRACTS", label: "Contracts" },
 ];
 const CAP_OPTIONS = [
   { value: "REST_AT_CAP", label: "Rest at cap" },
@@ -87,6 +82,7 @@ export function RangeIcebergFields({
   connector,
   sizeRule,
   baseSymbol,
+  quoteSymbol,
   maxBase = 0,
 }: {
   state: OrderState;
@@ -94,6 +90,7 @@ export function RangeIcebergFields({
   connector: string;
   sizeRule: SizeRule | null;
   baseSymbol: string;
+  quoteSymbol: string;
   maxBase?: number;
 }) {
   const [advanced, setAdvanced] = useState(state.ri_show_advanced);
@@ -105,6 +102,11 @@ export function RangeIcebergFields({
     ? state.ri_limit_price
     : Math.max(state.ri_price_low, state.ri_price_high);
   const sent = icebergSentSize(input, sizeRule, price, state.ri_contracts_confirmed, maxBase);
+  const unitSymbol = state.ri_size_unit === "QUOTE" ? quoteSymbol : baseSymbol;
+  const requestedBase = state.ri_size_unit === "QUOTE"
+    ? (price > 0 ? state.ri_total_amount / price : 0)
+    : state.ri_total_amount;
+  const rounded = sent.error ? null : roundDownNote(requestedBase, sent.total, baseSymbol);
 
   return (
     <div className="space-y-2.5">
@@ -117,47 +119,34 @@ export function RangeIcebergFields({
         options={MODE_OPTIONS}
       />
       <NumberField
-        label={`Total amount (${state.ri_size_unit.toLowerCase()})`}
+        label={unitSymbol ? `Total amount (${unitSymbol})` : "Total amount"}
         value={state.ri_total_amount}
         field="ri_total_amount"
         dispatch={dispatch}
         step={sizeRule && state.ri_size_unit === "BASE" && sizeRule.increment > 0 ? sizeRule.increment : 0.001}
         min={0}
       />
-      {state.ri_size_unit === "QUOTE" && sent.error == null && sent.total > 0 && (
-        <p className="text-[10px] text-[var(--color-text-muted)]">
-          This order sends {sent.total} {baseSymbol}, {sent.perSlice} per slice.
-        </p>
-      )}
       {sizeRule && state.ri_size_unit === "BASE" && sizeRule.minOrderSize > 0 && (
         <p className="text-[10px] text-[var(--color-text-muted)]">
-          Step {sizeRule.increment || sizeRule.minOrderSize} {baseSymbol}. Minimum {sizeRule.minOrderSize}.
-          {sent.error == null && sent.total !== state.ri_total_amount
-            ? ` This order sends ${sent.total}, ${sent.perSlice} per slice.`
-            : ""}
+          Step {formatTokenAmount(orderStep(sizeRule) || sizeRule.minOrderSize)}{baseSymbol ? ` ${baseSymbol}` : ""}. Minimum {formatTokenAmount(sizeRule.minOrderSize)}.
         </p>
       )}
-      {state.ri_size_unit === "CONTRACTS" && (
-        <label className="flex cursor-pointer items-center gap-2 text-[10px] text-[var(--color-text)]">
-          <input
-            type="checkbox"
-            checked={state.ri_contracts_confirmed}
-            onChange={(e) => set("ri_contracts_confirmed", e.target.checked)}
-            className="h-3.5 w-3.5 accent-[var(--color-primary)]"
-          />
-          I mean contracts, not base coins
-        </label>
+      {rounded && (
+        <p className="text-[10px] text-[var(--color-text-muted)]">{rounded}</p>
       )}
       <SelectField
         label="Size unit"
         value={state.ri_size_unit}
         field="ri_size_unit"
         dispatch={dispatch}
-        options={UNIT_OPTIONS}
+        options={sizeUnitChoices(baseSymbol, quoteSymbol)}
       />
       {connector === "mexc_perpetual" && (
         <p className="text-[10px] text-[var(--color-text-muted)]">
-          Amounts stay in the unit you pick. MEXC converts base size by the contract size (AIOT-USDT is 10). Child orders wait at least {state.ri_min_order_interval}s, inside the 4 requests per 2 seconds limit.
+          {sizeRule?.contractSize
+            ? `One contract is ${formatTokenAmount(sizeRule.contractSize)} ${baseSymbol}. A size that is not a whole contract is rounded down. `
+            : ""}
+          Child orders wait at least {state.ri_min_order_interval}s, inside the 4 requests per 2 seconds limit.
         </p>
       )}
       {state.ri_mode === "RANGE" ? (
@@ -215,8 +204,8 @@ export function RangeIcebergFields({
       {preview && (
         <div className="rounded border border-[var(--color-border)] bg-[var(--color-bg)] px-2.5 py-2 text-[10px] text-[var(--color-text-muted)]">
           <p className="font-medium text-[var(--color-text)]">Preview</p>
-          <p>Total {sent.error ? preview.total : sent.total} {state.ri_size_unit.toLowerCase()}</p>
-          <p>Per slice {Number((sent.error ? preview.perSlice : sent.perSlice).toPrecision(6))} across {preview.sliceCount}</p>
+          <p>Total {formatTokenAmount(sent.error ? preview.total : sent.total)} {sent.error ? unitSymbol : baseSymbol}</p>
+          <p>Per slice {formatTokenAmount(sent.error ? preview.perSlice : sent.perSlice)} {sent.error ? unitSymbol : baseSymbol} across {preview.sliceCount}</p>
           <p>Interval {formatInterval(preview.intervalSeconds)}</p>
           <p>Max price {preview.maxPrice ?? "not set"}</p>
           {sent.error && <p className="text-[var(--color-red)]">{sent.error}</p>}

@@ -15,6 +15,7 @@ import {
 import { ORDER_TYPE_OPTIONS } from "./field-options";
 import type { ExecutorValidation } from "./types";
 import type { PositionAction, PositionState } from "./position-config";
+import { formatTokenAmount, legalBaseAmount, orderStep, roundDownNote, type SizeRule } from "@/lib/order-size";
 
 // ── Panel Component ──
 
@@ -25,13 +26,19 @@ interface Props {
   currentPrice: number | null;
   isSpot?: boolean;
   pair?: string;
+  /** The pair's minimum size and contract step. Null until trading rules arrive. */
+  sizeRule?: SizeRule | null;
 }
 
-export function PositionConfigPanel({ state, dispatch, validation, currentPrice, isSpot = false, pair }: Props) {
+export function PositionConfigPanel({ state, dispatch, validation, currentPrice, isSpot = false, pair, sizeRule = null }: Props) {
   // Anchor the entry the first time this market has a price, so the panel opens
   // with its lines already on the chart: the two barriers hang off the entry and
   // there is nothing to drag until it exists. Clearing the entry back to 0 still
   // means "market order" — the reducer has spent this market's one anchor.
+  const base = pair?.split("-")[0] || "";
+  const snapped = sizeRule ? legalBaseAmount(state.amount, sizeRule) : state.amount;
+  const rounded = roundDownNote(state.amount, snapped, base);
+
   useEffect(() => {
     if (currentPrice && currentPrice > 0 && !state.anchored) {
       dispatch({ type: "ANCHOR", price: currentPrice });
@@ -78,9 +85,17 @@ export function PositionConfigPanel({ state, dispatch, validation, currentPrice,
           field="amount"
           dispatch={dispatch}
           currentPrice={currentPrice}
-          step={0.001}
+          step={sizeRule && sizeRule.increment > 0 ? sizeRule.increment : 0.001}
           pair={pair}
         />
+        {sizeRule && sizeRule.minOrderSize > 0 && (
+          <p className="text-[10px] text-[var(--color-text-muted)]">
+            Step {formatTokenAmount(orderStep(sizeRule) || sizeRule.minOrderSize)}{base ? ` ${base}` : ""}. Minimum {formatTokenAmount(sizeRule.minOrderSize)}.
+          </p>
+        )}
+        {rounded && (
+          <p className="text-[10px] text-[var(--color-text-muted)]">{rounded}</p>
+        )}
         <LeverageField value={state.leverage} field="leverage" dispatch={dispatch} isSpot={isSpot} />
       </div>
 

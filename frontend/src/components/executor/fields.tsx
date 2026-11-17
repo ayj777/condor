@@ -430,8 +430,8 @@ export function AmountField({
   const id = useId();
   const inputRef = useRef<HTMLInputElement>(null);
 
-  const baseAsset = baseSymbol ?? pair?.split("-")[0] ?? "base";
-  const quoteAsset = quoteSymbol ?? pair?.split("-")[1] ?? "quote";
+  const baseAsset = baseSymbol ?? pair?.split("-")[0] ?? "";
+  const quoteAsset = quoteSymbol ?? pair?.split("-")[1] ?? "";
 
   // When inQuote mode, show quote value; dispatch always stores base amount
   const displayValue = inQuote && currentPrice && currentPrice > 0 ? value * currentPrice : value;
@@ -471,7 +471,7 @@ export function AmountField({
   return (
     <div>
       <label htmlFor={id} className="mb-1 block text-xs text-[var(--color-text-muted)]">
-        Amount ({inQuote ? quoteAsset : baseAsset})
+        Amount{(inQuote ? quoteAsset : baseAsset) ? ` (${inQuote ? quoteAsset : baseAsset})` : ""}
       </label>
       <div className="flex items-center gap-1">
         <input

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { baseAmountError, floorBaseAmount, legalBaseAmount, percentBase, quantizePrice, snapBaseAmount } from "./order-size";
+import { baseAmountError, floorBaseAmount, formatTokenAmount, legalBaseAmount, percentBase, quantizePrice, roundDownNote, sizeUnitChoices, sizeUnitSymbol, snapBaseAmount } from "./order-size";
 
 const AIOT = { minOrderSize: 10, increment: 10 };
 
@@ -21,7 +21,7 @@ describe("MEXC base size step", () => {
   it("keeps the create disabled below the minimum and names it", () => {
     expect(baseAmountError(0.001, AIOT, "AIOT")).toBe("Minimum order size is 10 AIOT");
     expect(baseAmountError(4, AIOT, "AIOT")).toBe("Minimum order size is 10 AIOT");
-    expect(baseAmountError(0, AIOT, "AIOT")).toBe("Amount required (base currency)");
+    expect(baseAmountError(0, AIOT, "AIOT")).toBe("Amount required");
   });
 
   it("rejects a size that floors below the minimum", () => {
@@ -38,6 +38,21 @@ describe("MEXC base size step", () => {
   it("quantizes a price onto the tick", () => {
     expect(quantizePrice(0.081374, 0.00001)).toBeCloseTo(0.08137, 8);
     expect(quantizePrice(0.08, 0)).toBe(0.08);
+  });
+
+  it("floors a size that is not a whole contract and names the token", () => {
+    const rule = { minOrderSize: 10, increment: 1, contractSize: 10 };
+    expect(legalBaseAmount(25, rule)).toBe(20);
+    expect(roundDownNote(25, 20, "AIOT")).toBe("Rounded down to 20 AIOT.");
+    expect(roundDownNote(20, 20, "AIOT")).toBeNull();
+    expect(formatTokenAmount(30000)).toBe("30,000");
+    expect(formatTokenAmount(2430)).toBe("2,430");
+    expect(sizeUnitSymbol("BASE", "AIOT-USDT")).toBe("AIOT");
+    expect(sizeUnitSymbol("QUOTE", "AIOT-USDT")).toBe("USDT");
+    expect(sizeUnitChoices("AIOT", "USDT")).toEqual([
+      { value: "BASE", label: "AIOT" },
+      { value: "QUOTE", label: "USDT" },
+    ]);
   });
 
   it("leaves a venue with no step alone", () => {

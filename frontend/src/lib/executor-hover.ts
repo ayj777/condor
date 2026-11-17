@@ -1,6 +1,7 @@
 import type { ExecutorInfo } from "@/lib/api";
 import { formatPriceSig } from "@/lib/formatters";
 import { executorTypeLabel } from "@/lib/executor-run";
+import { formatTokenAmount, sizeUnitSymbol } from "@/lib/order-size";
 
 export interface HoverOrder {
   price: string;
@@ -201,15 +202,16 @@ export function executorHoverModel(executor: ExecutorInfo, now = Date.now()): Ex
   const mode = modeRaw ? modeLabel(modeRaw) : "";
   if (mode) add("Mode", mode);
 
-  const unit = text(first(cfg, info, ["size_unit"])) || "BASE";
+  const unit = sizeUnitSymbol(text(first(cfg, info, ["size_unit"])), executor.trading_pair);
   const total = num(pick(cfg, ["total_amount"]) ?? pick(info, ["target_amount"]) ?? pick(cfg, ["amount"]));
   const filled = num(pick(info, ["filled_amount"]));
+  const amountText = (amount: number) => (unit ? `${formatTokenAmount(amount)} ${unit}` : formatTokenAmount(amount));
   if (total != null && total > 0) {
     const pct = filled != null && filled >= 0 ? ` (${((filled / total) * 100).toFixed(1)}%)` : "";
-    const filledText = filled != null ? `${filled} filled${pct}` : "";
-    add("Size", filledText ? `${total} ${unit}, ${filledText}` : `${total} ${unit}`);
+    const filledText = filled != null ? `${formatTokenAmount(filled)} filled${pct}` : "";
+    add("Size", filledText ? `${amountText(total)}, ${filledText}` : amountText(total));
   } else if (filled != null) {
-    add("Filled", `${filled} ${unit}`);
+    add("Filled", amountText(filled));
   }
 
   const limit = num(first(cfg, info, ["limit_price"]));
@@ -230,7 +232,7 @@ export function executorHoverModel(executor: ExecutorInfo, now = Date.now()): Ex
   const levelCount = num(cfg.levels) ?? (Array.isArray(info.levels) ? null : num(info.levels));
   if (levelCount != null) add("Levels", String(levelCount));
   const slice = num(first(cfg, info, ["slice_amount"]));
-  if (slice != null && slice > 0) add("Slice", `${slice} ${unit}`);
+  if (slice != null && slice > 0) add("Slice", unit ? `${formatTokenAmount(slice)} ${unit}` : formatTokenAmount(slice));
 
   const duration = first(cfg, info, ["duration"]);
   const durationSec = durationSeconds(duration);

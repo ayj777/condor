@@ -96,12 +96,12 @@ describe("executor hover details", () => {
     expect(model.rows).toEqual(
       expect.arrayContaining([
         { label: "Mode", value: "Up to" },
-        { label: "Size", value: "30000 BASE, 12000 filled (40.0%)" },
+        { label: "Size", value: "30,000 AIOT, 12,000 filled (40.0%)" },
         { label: "Limit", value: "0.081" },
         { label: "Iceberg", value: "Yes" },
         { label: "Visible", value: "2" },
         { label: "Levels", value: "4" },
-        { label: "Slice", value: "1500 BASE" },
+        { label: "Slice", value: "1,500 AIOT" },
         { label: "Duration", value: "1h" },
         { label: "Schedule", value: "10 slices, every 30s" },
         { label: "Remaining", value: "50m" },
@@ -122,8 +122,21 @@ describe("executor hover details", () => {
       { price: "0.081", amount: "1500", filled: "100", status: "OPEN" },
       { price: "0.082", amount: "400", filled: "5", status: "PARTIALLY_FILLED" },
     ]);
+    expect(model.rows.map((row) => row.value).join(" ")).not.toMatch(/\b(BASE|QUOTE|CONTRACTS)\b/);
     expect(model.closeType).toBe("Early Stop");
     expect(model.statusMessage).toBe("Cancel was not confirmed on the exchange");
+  });
+
+  it("labels a quote size with the quote token", () => {
+    const model = executorHoverModel(
+      executor({
+        timestamp: 0,
+        pnl: 0,
+        config: { size_unit: "QUOTE", total_amount: 2430 },
+        custom_info: {},
+      }),
+    );
+    expect(model.rows.find((row) => row.label === "Size")?.value).toBe("2,430 USDT");
   });
 
   it("shows a range as low to high and skips fields the executor does not have", () => {
