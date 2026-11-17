@@ -102,7 +102,65 @@ async def confirm_leverage(
         )
     if current is not None and int(current) == int(leverage):
         return
-    await trading.set_leverage(account, connector, pair, int(leverage))
+    await _set_leverage(trading, account, connector, pair, int(leverage), matched, side)
+
+
+def _leverage_side(matched: Optional[dict], requested: object) -> Optional[str]:
+    """The position this leverage change applies to.
+
+    A matched row wins, so a long and a short are not both changed. With no
+    row, the requested side is sent so the connector still knows which book.
+    """
+    if matched is not None:
+        named = _side_key(matched.get("position_side") or matched.get("side"))
+        if named in ("LONG", "SHORT"):
+            return named
+    named = _side_key(requested)
+    return named if named in ("LONG", "SHORT") else None
+
+
+async def _set_leverage(
+    trading: Any,
+    account: str,
+    connector: str,
+    pair: str,
+    leverage: int,
+    matched: Optional[dict],
+    requested: object,
+) -> None:
+    """Call set_leverage with the position side.
+
+    The stock client method has no side argument, so the body is posted
+    directly and the side is not dropped.
+    """
+    import inspect
+
+    position_side = _leverage_side(matched, requested)
+    setter = getattr(trading, "set_leverage", None)
+    accepts_side = False
+    if setter is not None:
+        try:
+            signature = inspect.signature(setter)
+        except (TypeError, ValueError):
+            signature = None
+        if signature is not None:
+            accepts_side = "position_side" in signature.parameters or any(
+                param.kind == inspect.Parameter.VAR_KEYWORD
+                for param in signature.parameters.values()
+            )
+    if setter is not None and accepts_side:
+        await setter(
+            account, connector, pair, int(leverage), position_side=position_side
+        )
+        return
+    body = {"trading_pair": pair, "leverage": int(leverage)}
+    if position_side:
+        body["position_side"] = position_side
+    post = getattr(trading, "_post", None)
+    if post is None:
+        await trading.set_leverage(account, connector, pair, int(leverage))
+        return
+    await post(f"/trading/{account}/{connector}/leverage", json=body)
 
 
 def strip_order_only_fields(executor_type: str, config: dict) -> None:

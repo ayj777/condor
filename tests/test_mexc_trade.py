@@ -189,8 +189,10 @@ class _Trading:
         self.margin_calls = []
         self.margin_status = margin_status
 
-    async def set_leverage(self, account, connector, pair, leverage):
-        self.leverage_calls.append((account, connector, pair, leverage))
+    async def set_leverage(
+        self, account, connector, pair, leverage, position_side=None
+    ):
+        self.leverage_calls.append((account, connector, pair, leverage, position_side))
 
     async def _post(self, path, json=None):
         self.margin_calls.append((path, json))
@@ -334,7 +336,7 @@ def test_an_open_2x_position_is_not_moved_to_the_form_default():
         confirm_leverage(client, "master_account", "mexc_perpetual", "AIOT-USDT", 5, 1)
     )
     assert trading.leverage_calls == [
-        ("master_account", "mexc_perpetual", "AIOT-USDT", 5)
+        ("master_account", "mexc_perpetual", "AIOT-USDT", 5, "LONG")
     ]
 
 
@@ -1057,6 +1059,147 @@ def test_a_hedge_stop_closes_only_the_filled_side(monkeypatch):
     assert "short" in caught.value.detail
     assert "60770" not in caught.value.detail
     assert stopped == []
+
+
+def test_leverage_names_the_side_when_both_books_are_open():
+    from condor.fetchers.account_settings import confirm_leverage
+
+    trading = _Trading()
+
+    async def get_positions(**_kwargs):
+        return {
+            "data": [
+                {
+                    "connector_name": "mexc_perpetual",
+                    "trading_pair": "AIOT-USDT",
+                    "position_side": "LONG",
+                    "amount": 60770,
+                    "leverage": 2,
+                },
+                {
+                    "connector_name": "mexc_perpetual",
+                    "trading_pair": "AIOT-USDT",
+                    "position_side": "SHORT",
+                    "amount": 100,
+                    "leverage": 2,
+                },
+            ]
+        }
+
+    trading.get_positions = get_positions
+    client = FakeClient()
+    client.trading = trading
+    asyncio.run(
+        confirm_leverage(client, "master_account", "mexc_perpetual", "AIOT-USDT", 5, 2)
+    )
+    assert trading.leverage_calls == [
+        ("master_account", "mexc_perpetual", "AIOT-USDT", 5, "SHORT")
+    ]
+
+
+def test_the_stock_leverage_call_still_sends_the_side():
+    from condor.fetchers.account_settings import confirm_leverage
+
+    class _Stock:
+        def __init__(self):
+            self.posts = []
+
+        async def set_leverage(
+            self, account_name, connector_name, trading_pair, leverage
+        ):
+            raise AssertionError("the stock method drops the side")
+
+        async def _post(self, path, json=None):
+            self.posts.append((path, json))
+
+        async def get_positions(self, **_kwargs):
+            return {
+                "data": [
+                    {
+                        "connector_name": "mexc_perpetual",
+                        "trading_pair": "AIOT-USDT",
+                        "side": "LONG",
+                        "amount": 60770,
+                        "leverage": 2,
+                    }
+                ]
+            }
+
+    trading = _Stock()
+    client = FakeClient()
+    client.trading = trading
+    asyncio.run(
+        confirm_leverage(client, "master_account", "mexc_perpetual", "AIOT-USDT", 5, 1)
+    )
+    assert trading.posts[0][1]["position_side"] == "LONG"
+    assert trading.posts[0][1]["leverage"] == 5
+
+
+def test_telegram_refuses_a_perp_order_until_the_mode_is_read():
+    from handlers.cex.trade import (
+        load_position_mode,
+        parsed_position_mode,
+        prepare_perp_order,
+    )
+
+    assert parsed_position_mode({}) == ""
+    assert parsed_position_mode({"positionMode": 1}) == "HEDGE"
+    assert parsed_position_mode({"position_mode": 2}) == "ONEWAY"
+    assert parsed_position_mode({"data": {"positionMode": 1}}) == "HEDGE"
+
+    class _Screen:
+        def __init__(self, payload):
+            self.payload = payload
+            self.calls = []
+
+        async def get_position_mode(self, **_kwargs):
+            return self.payload
+
+        async def get_positions(self, **_kwargs):
+            return {"data": []}
+
+        async def set_leverage(self, **kwargs):
+            self.calls.append(kwargs)
+
+    trading = _Screen({})
+    client = FakeClient()
+    client.trading = trading
+    cache = {}
+    mode = asyncio.run(
+        load_position_mode(client, "master", "mexc_perpetual", "AIOT-USDT", cache)
+    )
+    assert mode == ""
+    assert cache["pos_mode_mexc_perpetual"] == ""
+    assert trading.calls == []
+
+    rows = [
+        {
+            "connector_name": "mexc_perpetual",
+            "trading_pair": "AIOT-USDT",
+            "position_side": "LONG",
+            "amount": 60770,
+        }
+    ]
+    with pytest.raises(ValueError) as unread:
+        prepare_perp_order("", "OPEN", "SELL", 1000, rows, "AIOT-USDT")
+    assert "not been read" in str(unread.value)
+
+    opened = prepare_perp_order("HEDGE", "OPEN", "SELL", 1000, rows, "AIOT-USDT")
+    assert opened["position_side"] == "SHORT"
+    assert opened["reduce_only"] is False
+    assert opened["position_action"] == "OPEN"
+    assert opened["trade_type"] == "SELL"
+    assert opened["amount"] == 1000
+
+    closed = prepare_perp_order("HEDGE", "CLOSE", "BUY", 100000, rows, "AIOT-USDT")
+    assert closed["position_side"] == "LONG"
+    assert closed["reduce_only"] is True
+    assert closed["position_action"] == "CLOSE"
+    assert closed["trade_type"] == "SELL"
+    assert closed["amount"] == 60770
+    with pytest.raises(ValueError) as no_short:
+        prepare_perp_order("HEDGE", "CLOSE", "SELL", 10, rows, "AIOT-USDT")
+    assert "short" in str(no_short.value)
 
 
 def test_a_filled_mark_replaces_entry_notional():

@@ -129,10 +129,7 @@ async def load_position_mode(client, account, connector, trading_pair, cache):
     )
     from condor.web.routes.positions import canonical_position_mode
 
-    raw = mode_result.get("position_mode")
-    if raw in (None, ""):
-        raw = mode_result.get("positionMode", "HEDGE")
-    position_mode = canonical_position_mode(raw) or "HEDGE"
+    position_mode = parsed_position_mode(mode_result)
     cache[_get_position_mode_cache_key(connector)] = position_mode
     lev_key = _get_leverage_cache_key(connector, trading_pair)
     if lev_key not in cache:
@@ -161,6 +158,214 @@ async def apply_confirmed_leverage(
         leverage=leverage,
     )
     return True
+
+
+def parsed_position_mode(result) -> str:
+    """HEDGE or ONEWAY from a real read, or empty when the read did not say.
+
+    MEXC answers 1 for hedge and 2 for one-way. An empty payload is not hedge.
+    """
+    from condor.web.routes.positions import canonical_position_mode
+
+    raw = result
+    if isinstance(result, dict):
+        data = result.get("data") if isinstance(result.get("data"), dict) else {}
+        raw = ""
+        for source in (result, data):
+            for key in ("position_mode", "positionMode", "mode"):
+                value = source.get(key)
+                if value not in (None, ""):
+                    raw = value
+                    break
+            if raw not in (None, ""):
+                break
+    return canonical_position_mode(raw)
+
+
+def _trade_side(raw: object) -> str:
+    text = str(raw or "").strip()
+    if "." in text:
+        text = text.rsplit(".", 1)[-1]
+    text = text.upper()
+    if text in ("LONG", "BUY", "1"):
+        return "LONG"
+    if text in ("SHORT", "SELL", "2"):
+        return "SHORT"
+    return ""
+
+
+def _book_amount(rows, trading_pair: str, want: str) -> float:
+    want_pair = str(trading_pair or "").replace("_", "-").upper()
+    amount = 0.0
+    for row in rows or []:
+        row_pair = str(row.get("trading_pair") or "").replace("_", "-").upper()
+        if want_pair and row_pair != want_pair:
+            continue
+        if _trade_side(row.get("position_side") or row.get("side")) != want:
+            continue
+        try:
+            size = abs(float(row.get("amount") or 0))
+        except (TypeError, ValueError):
+            continue
+        if size > amount:
+            amount = size
+    return amount
+
+
+def prepare_perp_order(
+    mode: str, action: str, side: str, amount: float, rows, trading_pair: str
+) -> dict:
+    """The order a Telegram perp send will post.
+
+    Hedge matches the web. Open short is its own position. Close long is
+    reduce-only, position_side LONG, the sell side, and never more than the
+    long. An unread mode is refused. 1 is hedge and 2 is one-way.
+    """
+    if mode not in ("HEDGE", "ONEWAY"):
+        raise ValueError("Position mode has not been read, so the order was not sent.")
+    action_name = str(action or "OPEN").upper()
+    if "." in action_name:
+        action_name = action_name.rsplit(".", 1)[-1]
+    want_long = _trade_side(side) != "SHORT"
+    if mode == "HEDGE":
+        if action_name != "CLOSE":
+            return {
+                "trade_type": "BUY" if want_long else "SELL",
+                "position_action": "OPEN",
+                "position_side": "LONG" if want_long else "SHORT",
+                "reduce_only": False,
+                "amount": amount,
+            }
+        book = _book_amount(rows, trading_pair, "LONG" if want_long else "SHORT")
+        if book <= 0:
+            which = "long" if want_long else "short"
+            raise ValueError(f"No open {which} to close")
+        return {
+            "trade_type": "SELL" if want_long else "BUY",
+            "position_action": "CLOSE",
+            "position_side": "LONG" if want_long else "SHORT",
+            "reduce_only": True,
+            "amount": min(amount, book),
+        }
+    long_amt = _book_amount(rows, trading_pair, "LONG")
+    short_amt = _book_amount(rows, trading_pair, "SHORT")
+    if action_name == "CLOSE":
+        if long_amt <= 0 and short_amt <= 0:
+            raise ValueError("No open position to close")
+        closing_long = short_amt <= 0 or long_amt >= short_amt
+        book = long_amt if closing_long else short_amt
+        return {
+            "trade_type": "SELL" if closing_long else "BUY",
+            "position_action": "CLOSE",
+            "position_side": "LONG" if closing_long else "SHORT",
+            "reduce_only": True,
+            "amount": min(amount, book),
+        }
+    reducing = (want_long and short_amt > 0 and long_amt <= 0) or (
+        not want_long and long_amt > 0
+    )
+    book = short_amt if want_long else long_amt
+    prepared = {
+        "trade_type": "BUY" if want_long else "SELL",
+        "position_action": "OPEN",
+        "reduce_only": reducing,
+        "amount": min(amount, book) if reducing and book > 0 else amount,
+    }
+    return prepared
+
+
+def _accepts_keyword(method, name: str) -> bool:
+    import inspect
+
+    try:
+        signature = inspect.signature(method)
+    except (TypeError, ValueError):
+        return False
+    for param_name, param in signature.parameters.items():
+        if param_name == name:
+            return True
+        if param.kind == inspect.Parameter.VAR_KEYWORD:
+            return True
+    return False
+
+
+async def submit_trade_order(
+    client, account, connector, pair, order_type, price, prepared
+):
+    """Post the prepared order. The stock client drops side and reduce-only, so those go on the body."""
+    body = {
+        "account_name": account,
+        "connector_name": connector,
+        "trading_pair": pair,
+        "trade_type": prepared["trade_type"],
+        "amount": prepared["amount"],
+        "order_type": order_type,
+        "position_action": prepared["position_action"],
+    }
+    if price is not None:
+        body["price"] = price
+    if prepared.get("position_side"):
+        body["position_side"] = prepared["position_side"]
+    if "reduce_only" in prepared:
+        body["reduce_only"] = prepared["reduce_only"]
+    place = getattr(client.trading, "place_order", None)
+    needs_side = bool(prepared.get("position_side")) or "reduce_only" in prepared
+    if needs_side and (place is None or not _accepts_keyword(place, "position_side")):
+        return await client.trading._post("/trading/orders", json=body)
+    return await place(
+        account_name=account,
+        connector_name=connector,
+        trading_pair=pair,
+        trade_type=prepared["trade_type"],
+        amount=prepared["amount"],
+        order_type=order_type,
+        price=price,
+        position_action=prepared["position_action"],
+    )
+
+
+async def place_guarded_order(
+    client,
+    account,
+    connector,
+    trading_pair,
+    side,
+    amount,
+    order_type,
+    price,
+    position_action,
+    mode,
+):
+    """Place a spot order as before. A perp waits for a real hedge or one-way read."""
+    from condor.venue_capabilities import is_perpetual_connector
+
+    if not is_perpetual_connector(connector or ""):
+        return await client.trading.place_order(
+            account_name=account,
+            connector_name=connector,
+            trading_pair=trading_pair,
+            trade_type=side,
+            amount=amount,
+            order_type=order_type,
+            price=price,
+            position_action=position_action,
+        )
+    if mode not in ("HEDGE", "ONEWAY"):
+        raise ValueError("Position mode has not been read, so the order was not sent.")
+    from condor.fetchers.positions import fetch_positions
+
+    try:
+        rows = await fetch_positions(client, connector_name=connector, strict=True)
+    except Exception as exc:
+        raise ValueError(
+            "Cannot read open positions, so the order was not sent."
+        ) from exc
+    prepared = prepare_perp_order(
+        mode, position_action, side, amount, rows, trading_pair
+    )
+    return await submit_trade_order(
+        client, account, connector, trading_pair, order_type, price, prepared
+    )
 
 
 def _get_position_mode_cache_key(connector: str) -> str:
@@ -408,7 +613,9 @@ def _build_trade_keyboard(
     # Row 6 (perpetual): Quote | Execute
     if is_perpetual:
         lev_display = f"{leverage}x" if leverage else f"{DEFAULT_LEVERAGE}x"
-        mode_display = position_mode or "HEDGE"
+        mode_display = (
+            position_mode if position_mode in ("HEDGE", "ONEWAY") else "unread"
+        )
         keyboard.append(
             [
                 InlineKeyboardButton(
@@ -699,8 +906,8 @@ async def show_trade_menu(
         leverage = context.user_data.get(
             _get_leverage_cache_key(connector, trading_pair), DEFAULT_LEVERAGE
         )
-        position_mode = context.user_data.get(
-            _get_position_mode_cache_key(connector), "HEDGE"
+        position_mode = (
+            context.user_data.get(_get_position_mode_cache_key(connector)) or ""
         )
 
     # Build text and keyboard
@@ -811,7 +1018,7 @@ async def _update_trade_message(context: ContextTypes.DEFAULT_TYPE, message) -> 
         else None
     )
     position_mode = (
-        context.user_data.get(_get_position_mode_cache_key(connector), "HEDGE")
+        context.user_data.get(_get_position_mode_cache_key(connector)) or ""
         if is_perpetual
         else None
     )
@@ -1501,9 +1708,11 @@ async def handle_trade_toggle_pos_mode(
         client = await get_client(chat_id, context=context)
 
         # Get current mode
-        current_mode = context.user_data.get(
-            _get_position_mode_cache_key(connector), "HEDGE"
+        current_mode = (
+            context.user_data.get(_get_position_mode_cache_key(connector)) or ""
         )
+        if current_mode not in ("HEDGE", "ONEWAY"):
+            raise ValueError("Position mode has not been read, so it was not changed.")
         new_mode = "ONEWAY" if current_mode == "HEDGE" else "HEDGE"
 
         # Set new mode on exchange
@@ -1566,19 +1775,31 @@ async def handle_trade_execute(
         else:
             amount_float = float(amount)
 
-        result = await client.trading.place_order(
-            account_name=account,
-            connector_name=connector,
-            trading_pair=trading_pair,
-            trade_type=side,
-            amount=amount_float,
-            order_type=order_type,
-            price=(
+        mode = context.user_data.get(_get_position_mode_cache_key(connector)) or ""
+        from condor.venue_capabilities import is_perpetual_connector
+
+        if is_perpetual_connector(connector) and mode not in ("HEDGE", "ONEWAY"):
+            try:
+                mode = await load_position_mode(
+                    client, account, connector, trading_pair, context.user_data
+                )
+            except Exception:
+                mode = ""
+        result = await place_guarded_order(
+            client,
+            account,
+            connector,
+            trading_pair,
+            side,
+            amount_float,
+            order_type,
+            (
                 float(price)
                 if price and order_type in ["LIMIT", "LIMIT_MAKER"]
                 else None
             ),
-            position_action=position_action,
+            position_action,
+            mode,
         )
 
         # Invalidate cache and flag for refresh on next fetch
@@ -1714,8 +1935,8 @@ async def _update_trade_menu_after_input(
             leverage = context.user_data.get(
                 _get_leverage_cache_key(connector, trading_pair), DEFAULT_LEVERAGE
             )
-            position_mode = context.user_data.get(
-                _get_position_mode_cache_key(connector), "HEDGE"
+            position_mode = (
+                context.user_data.get(_get_position_mode_cache_key(connector)) or ""
             )
 
         help_text = _build_trade_menu_text(
@@ -1802,20 +2023,31 @@ async def process_trade(
         else:
             amount_float = float(amount)
 
-        # Execute the trade
-        result = await client.trading.place_order(
-            account_name=account,
-            connector_name=connector,
-            trading_pair=trading_pair,
-            trade_type=side,
-            amount=amount_float,
-            order_type=order_type,
-            price=(
+        mode = context.user_data.get(_get_position_mode_cache_key(connector)) or ""
+        from condor.venue_capabilities import is_perpetual_connector
+
+        if is_perpetual_connector(connector) and mode not in ("HEDGE", "ONEWAY"):
+            try:
+                mode = await load_position_mode(
+                    client, account, connector, trading_pair, context.user_data
+                )
+            except Exception:
+                mode = ""
+        result = await place_guarded_order(
+            client,
+            account,
+            connector,
+            trading_pair,
+            side,
+            amount_float,
+            order_type,
+            (
                 float(price)
                 if price and order_type in ["LIMIT", "LIMIT_MAKER"]
                 else None
             ),
-            position_action=position_action,
+            position_action,
+            mode,
         )
 
         # Invalidate cache and flag for refresh on next fetch
