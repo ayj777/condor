@@ -31,6 +31,11 @@ interface Props {
   /** Width utility for the panel, e.g. `w-44`. */
   className?: string;
   role?: React.AriaRole;
+  id?: string;
+  /** The option the keyboard is on, while this panel is the focused listbox. */
+  ariaActiveDescendant?: string;
+  ariaLabel?: string;
+  onKeyDown?: React.KeyboardEventHandler<HTMLDivElement>;
   children: React.ReactNode;
 }
 
@@ -77,6 +82,10 @@ export function AnchoredMenu({
   gap = DEFAULT_GAP,
   className = "",
   role,
+  id,
+  ariaActiveDescendant,
+  ariaLabel,
+  onKeyDown,
   children,
 }: Props) {
   const menuRef = useRef<HTMLDivElement>(null);
@@ -175,7 +184,11 @@ export function AnchoredMenu({
   return createPortal(
     <div
       ref={menuRef}
+      id={id}
       role={role}
+      aria-label={ariaLabel}
+      aria-activedescendant={ariaActiveDescendant}
+      onKeyDown={onKeyDown}
       // Focusable on open without joining the tab order itself, so Tab from the
       // panel steps into the options rather than skipping the menu entirely.
       tabIndex={-1}

@@ -41,6 +41,7 @@ import { LP_SIDE_RANGE, useLpConfig } from "@/components/executor/lp-config";
 import { useGridConfig } from "@/components/executor/grid-config";
 import { HintBubble } from "@/components/ui/HintBubble";
 import { useOneTimeHint } from "@/hooks/useOneTimeHint";
+import { ExecutorTypeSelect } from "@/components/trade/ExecutorTypeSelect";
 import { TradeBottomPane } from "@/components/trade/TradeBottomPane";
 import { ViewOnlyOverlay } from "@/components/trade/ViewOnlyOverlay";
 import { useLastClose } from "@/hooks/useCandleStore";
@@ -1061,30 +1062,16 @@ export function CreateExecutor() {
 
           {activePanel === "config" ? (
             <>
-              {/* Type Tabs */}
-              <div className="border-b border-[var(--color-border)]">
-                <div className="flex">
-                  {TYPE_TABS.filter((t) => caps.executorTypes.includes(t.value)).map((tab) => (
-                    <button
-                      key={tab.value}
-                      onClick={() => handleTypeChange(tab.value)}
-                      className={`flex flex-1 items-center justify-center gap-1.5 px-2 py-2.5 text-[11px] font-medium transition-colors ${
-                        executorType === tab.value
-                          ? "border-b-2 border-[var(--color-primary)] text-[var(--color-primary)]"
-                          : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
-                      }`}
-                    >
-                      {tab.icon}
-                      {tab.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
+              <ExecutorTypeSelect
+                options={TYPE_TABS.filter((tab) => caps.executorTypes.includes(tab.value))}
+                value={executorType}
+                onChange={handleTypeChange}
+              />
 
-              {/* Everything the venue's credentials gate — the config form and
-                  the Create button — sits inside this one positioned box, so
+              {/* Everything the venue's credentials gate, the config form and
+                  the Create button, sits inside this one positioned box, so
                   the view-only overlay covers exactly that and nothing else:
-                  the type tabs above it still switch, the Data tab beside it
+                  the type selector above it still switches, the Data tab beside it
                   is untouched, and the panel keeps its scroll/footer split. */}
               <div className="relative flex min-h-0 flex-1 flex-col">
                 {/* Config Panel */}

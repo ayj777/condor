@@ -59,7 +59,8 @@ export interface TradingProfile {
   confirmsAccountSettings: boolean;
   /**
    * The range iceberg executor treats a missing margin mode as "do not touch
-   * margin". Off until that executor is deployed. While off, the iceberg is refused.
+   * margin". True only where that executor is deployed. The MEXC value
+   * requires ayj777/hummingbot PR 3 or later.
    */
   rangeIcebergOmitsMargin: boolean;
 }
@@ -76,7 +77,8 @@ const TRADING_PROFILES: Record<string, TradingProfile> = {
     reduceOnly: true,
     rangeIceberg: true,
     confirmsAccountSettings: true,
-    rangeIcebergOmitsMargin: false,
+    // Requires ayj777/hummingbot PR 3 or later.
+    rangeIcebergOmitsMargin: true,
   },
 };
 

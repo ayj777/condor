@@ -800,20 +800,57 @@ def test_an_unread_leverage_is_not_left_in_the_config():
     assert trading.leverage_calls == []
 
 
-def test_range_iceberg_is_refused_until_margin_can_be_omitted(monkeypatch):
+def test_range_iceberg_is_created_when_margin_can_be_omitted(monkeypatch):
+    from dataclasses import replace
+
     from fastapi import HTTPException
 
-    client = FakeClient(result={"executor_id": "ex-ice"})
-    called = {"n": 0}
+    from condor import venue_capabilities
 
-    async def _create(*_args, **_kwargs):
-        called["n"] += 1
+    assert venue_capabilities.MEXC_PERPETUAL.range_iceberg_omits_margin is True
+    trading = _Trading()
+
+    async def get_positions(**_kwargs):
+        return {"data": []}
+
+    trading.get_positions = get_positions
+    client = FakeClient(result={"executor_id": "ex-ice"})
+    client.trading = trading
+    seen = {}
+
+    async def _create(_client, config, account_name="master_account"):
+        seen["config"] = dict(config)
+        seen["account"] = account_name
         return {"executor_id": "ex-ice"}
 
     monkeypatch.setattr(
         "condor.web.routes.executors.get_config_manager", lambda: _CM(client)
     )
     monkeypatch.setattr("condor.fetchers.executors.create_executor", _create)
+    result = asyncio.run(
+        create_executor_endpoint(
+            name="srv",
+            body=CreateExecutorRequest(
+                executor_type="range_iceberg_executor",
+                config={
+                    "connector_name": "mexc_perpetual",
+                    "trading_pair": "AIOT-USDT",
+                    "leverage": 2,
+                    "total_amount": 100,
+                },
+            ),
+            user=_USER,
+        )
+    )
+    assert result["executor_id"] == "ex-ice"
+    assert seen["config"].get("margin_mode") != "ISOLATED"
+    assert "margin_mode" not in seen["config"]
+
+    monkeypatch.setitem(
+        venue_capabilities.TRADING_PROFILES,
+        "mexc_perpetual",
+        replace(venue_capabilities.MEXC_PERPETUAL, range_iceberg_omits_margin=False),
+    )
     with pytest.raises(HTTPException) as caught:
         asyncio.run(
             create_executor_endpoint(
@@ -832,7 +869,6 @@ def test_range_iceberg_is_refused_until_margin_can_be_omitted(monkeypatch):
         )
     assert caught.value.status_code == 400
     assert "isolated" in caught.value.detail.lower()
-    assert called["n"] == 0
 
 
 def test_a_connector_mismatch_aborts_the_create_instead_of_looking_flat():

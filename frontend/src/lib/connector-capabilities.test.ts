@@ -84,7 +84,7 @@ describe("mexc_perpetual", () => {
     expect(caps.executorTypes).toContain("iceberg");
     expect(caps.marginModes).toEqual(["ISOLATED", "CROSS"]);
     expect(caps.confirmsAccountSettings).toBe(true);
-    expect(caps.rangeIcebergOmitsMargin).toBe(false);
+    expect(caps.rangeIcebergOmitsMargin).toBe(true);
   });
 
   it("does not add range iceberg to the other perpetual venues", () => {

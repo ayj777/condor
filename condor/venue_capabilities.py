@@ -33,9 +33,9 @@ class TradingProfile:
     reduce_only: bool
     range_iceberg: bool
     confirms_account_settings: bool = False
-    # Off until the executor treats a missing margin_mode as "do not touch
-    # margin". While this is off, a range iceberg is refused: the deployed
-    # executor would fill in isolated and post it onto the open position.
+    # Default off. On only where the deployed range iceberg executor leaves an
+    # omitted margin_mode unchanged. MEXC is on, which requires
+    # ayj777/hummingbot PR 3 or later.
     range_iceberg_omits_margin: bool = False
 
 
@@ -55,6 +55,9 @@ MEXC_PERPETUAL = TradingProfile(
     reduce_only=True,
     range_iceberg=True,
     confirms_account_settings=True,
+    # Requires ayj777/hummingbot PR 3 or later. That executor leaves an
+    # omitted margin_mode unchanged instead of filling in isolated.
+    range_iceberg_omits_margin=True,
 )
 
 # Recorded so the shared perp check agrees with the name check these two
@@ -96,7 +99,7 @@ ICEBERG_MARGIN_HOLD = (
 def iceberg_margin_block(connector: str, executor_type: str) -> str | None:
     """Why this range iceberg must not be created, or None when it may.
 
-    The flag stays off until the executor accepts an omitted margin_mode as
+    The flag is on only where the executor accepts an omitted margin_mode as
     "do not touch margin". Condor does not fill in isolated in its place.
     """
     if executor_type != "range_iceberg_executor":
