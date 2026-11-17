@@ -90,7 +90,7 @@ describe("executor hover details", () => {
       STARTED + 600_000,
     );
 
-    expect(model.type).toBe("Range iceberg");
+    expect(model.type).toBe("Limit iceberg");
     expect(model.side).toBe("BUY");
     expect(model.positionSide).toBe("LONG");
     expect(model.rows).toEqual(

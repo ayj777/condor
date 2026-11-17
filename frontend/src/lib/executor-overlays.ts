@@ -1,4 +1,5 @@
 import type { ExecutorInfo } from "./api";
+import { executorTypeLabel, rangeIcebergMode } from "./executor-run";
 import { escapeHtml, formatPriceSig } from "./formatters";
 import { getThemeColors, pnlHexColor, sideColor } from "./theme-colors";
 
@@ -43,6 +44,8 @@ export interface GridBox {
 export interface ExecutorOverlay {
   executorId: string;
   type: string;
+  /** Shown in place of `type` when the two differ. The type key itself stays put. */
+  typeLabel?: string;
   side: "buy" | "sell";
   status: string;
   closeType: string;
@@ -136,7 +139,7 @@ function lifetimeRange(executor: ExecutorInfo): { start: number; end: number } {
 
 /** The parts of an overlay each executor type draws for itself. */
 type OverlayExtras = Pick<ExecutorOverlay, "priceLines" | "markers"> &
-  Partial<Pick<ExecutorOverlay, "segment" | "gridBox" | "entryPrice" | "exitPrice">>;
+  Partial<Pick<ExecutorOverlay, "segment" | "gridBox" | "entryPrice" | "exitPrice" | "typeLabel">>;
 
 /**
  * Every overlay field that is copied off the executor unchanged.
@@ -587,12 +590,11 @@ function computeGenericOverlay(executor: ExecutorInfo): ExecutorOverlay {
 
 function computeRangeIcebergOverlay(executor: ExecutorInfo): ExecutorOverlay {
   const config = executor.config || {};
-  const info = executor.custom_info || {};
   const num = (value: unknown) => {
     const n = Number(value);
     return Number.isFinite(n) ? n : 0;
   };
-  const mode = String(info.mode ?? config.mode ?? "RANGE").toUpperCase();
+  const mode = rangeIcebergMode(executor);
   const low = num(config.price_low);
   const high = num(config.price_high);
   const limit = num(config.limit_price);
@@ -610,12 +612,13 @@ function computeRangeIcebergOverlay(executor: ExecutorInfo): ExecutorOverlay {
   } else if (limit > 0) {
     lines.push({
       price: limit,
-      label: "Limit",
+      label: mode === "UP_TO" ? "Limit iceberg" : "Limit",
       color: "#f59e0b",
       style: "dashed",
     });
   }
   return baseOverlay(executor, "range_iceberg", {
+    typeLabel: executorTypeLabel(executor),
     priceLines: lines,
     markers: [],
     gridBox,
@@ -838,7 +841,7 @@ export function renderOverlayTooltipHtml(
             <span style="background:${statusBg};color:${statusClr};font-size:9px;font-weight:600;padding:1px 5px;border-radius:3px">${escapeHtml(o.status)}</span>
           </div>
           <div style="display:flex;align-items:center;gap:4px;margin-bottom:2px">
-            <span style="background:${border};padding:1px 5px;border-radius:3px;font-size:10px;border:1px solid ${border}">${escapeHtml(o.type.toUpperCase())}</span>
+            <span style="background:${border};padding:1px 5px;border-radius:3px;font-size:10px;border:1px solid ${border}">${escapeHtml(o.typeLabel || o.type.toUpperCase())}</span>
             ${o.closeType ? `<span style="font-size:10px;color:${textMuted}">${escapeHtml(o.closeType)}</span>` : ""}
           </div>
           <div style="border-top:1px solid ${border};margin:6px 0;padding-top:6px;display:grid;grid-template-columns:1fr 1fr;gap:4px 16px">

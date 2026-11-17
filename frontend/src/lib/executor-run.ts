@@ -8,12 +8,36 @@ const STRATEGY_LABELS: Record<string, string> = {
   TWAP: "TWAP",
 };
 
+/** `UP_TO`, `up-to`, and `up to` are the same mode. Anything else is a range. */
+export function rangeIcebergMode(source: {
+  config?: Record<string, unknown> | null;
+  custom_info?: Record<string, unknown> | null;
+}): string {
+  const info = source.custom_info ?? {};
+  const cfg = source.config ?? {};
+  const raw = info.mode ?? cfg.mode ?? "RANGE";
+  return String(raw).trim().replace(/[\s-]+/g, "_").toUpperCase();
+}
+
 export function executorTypeLabel(ex: ExecutorInfo): string {
+  const type = (ex.type || "").toLowerCase();
+  if (type.includes("range_iceberg")) {
+    return rangeIcebergMode(ex) === "UP_TO" ? "Limit iceberg" : "Range iceberg";
+  }
   const strategy = String(ex.config?.execution_strategy ?? "").toUpperCase();
   if (strategy && STRATEGY_LABELS[strategy]) return STRATEGY_LABELS[strategy];
-  const type = (ex.type || "").toLowerCase();
-  if (type.includes("range_iceberg")) return "Range iceberg";
   return ex.type ? ex.type.charAt(0).toUpperCase() + ex.type.slice(1) : "—";
+}
+
+/**
+ * The type string a list shows.
+ *
+ * A range iceberg is named for its mode. Every other type stays the raw value
+ * the row already showed.
+ */
+export function displayedExecutorType(ex: ExecutorInfo): string {
+  if ((ex.type || "").toLowerCase().includes("range_iceberg")) return executorTypeLabel(ex);
+  return ex.type || "—";
 }
 
 /** Filled size, halt reason, and whether resume is meaningful for this row. */

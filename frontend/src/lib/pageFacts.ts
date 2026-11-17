@@ -35,6 +35,7 @@ import {
   toMs,
 } from "./formatters";
 import { ownerRowLabel, type FleetOwner } from "./agent-attribution";
+import { displayedExecutorType } from "./executor-run";
 import { runStatus } from "./perf-tree";
 import { formatWithRate, type RateTable } from "./rates";
 import type { ViewFacts } from "./viewFacts";
@@ -678,7 +679,10 @@ const ROUTES: {
       // ranking above, which answers a different question.
       const perMarket = new Map<string, { value: number; quote?: string }>();
       for (const ex of loaded) {
-        const name = `${ex.trading_pair} ${ex.type}`;
+        const typeName = (ex.type || "").toLowerCase().includes("range_iceberg")
+          ? displayedExecutorType(ex)
+          : ex.type;
+        const name = `${ex.trading_pair} ${typeName}`;
         const row = perMarket.get(name) ?? { value: 0, quote: ex.trading_pair?.split("-")[1] };
         row.value += ex.pnl ?? 0;
         perMarket.set(name, row);
