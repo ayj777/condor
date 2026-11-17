@@ -108,19 +108,20 @@ describe("executor hover details", () => {
         { label: "Cap", value: "Rest at cap" },
         { label: "Catch up", value: "Carry" },
         { label: "Reduce only", value: "No" },
-        { label: "Leverage", value: "1x" },
-        { label: "Margin", value: "ISOLATED" },
         { label: "Avg fill", value: "0.0805" },
-        { label: "Realized", value: "+1.2500" },
-        { label: "Unrealized", value: "-0.5000" },
         { label: "Net PnL", value: "+0.7500" },
         { label: "Started", value: formatStartMyt(STARTED) },
       ]),
     );
+    for (const dropped of ["Leverage", "Margin", "Realized", "Unrealized"]) {
+      expect(model.rows.map((row) => row.label)).not.toContain(dropped);
+    }
     expect(model.rows.find((row) => row.label === "Started")?.value).toContain("MYT");
+    expect(JSON.stringify(model)).not.toContain("ex-1");
+    expect(JSON.stringify(model)).not.toContain("ISOLATED");
     expect(model.orders).toEqual([
-      { price: "0.081", amount: "1500", filled: "100", exchangeId: "ex-1", status: "OPEN" },
-      { price: "0.082", amount: "400", filled: "5", exchangeId: "ex-3", status: "PARTIALLY_FILLED" },
+      { price: "0.081", amount: "1500", filled: "100", status: "OPEN" },
+      { price: "0.082", amount: "400", filled: "5", status: "PARTIALLY_FILLED" },
     ]);
     expect(model.closeType).toBe("Early Stop");
     expect(model.statusMessage).toBe("Cancel was not confirmed on the exchange");

@@ -6,7 +6,6 @@ export interface HoverOrder {
   price: string;
   amount: string;
   filled: string;
-  exchangeId: string;
   status: string;
 }
 
@@ -187,7 +186,6 @@ function hoverOrders(info: Record<string, unknown>): HoverOrder[] {
         price: price != null ? priceText(price) : "",
         amount: amount != null ? String(amount) : "",
         filled: filled != null ? String(filled) : "",
-        exchangeId,
         status: orderStatus(row) || "OPEN",
       });
     }
@@ -268,14 +266,6 @@ export function executorHoverModel(executor: ExecutorInfo, now = Date.now()): Ex
   if (stop != null && stop > 0 && stop !== -1) add("Stop loss", `${(stop * 100).toFixed(2)}%`);
   if (take != null && take > 0 && take !== -1) add("Take profit", `${(take * 100).toFixed(2)}%`);
 
-  const leverage = num(first(cfg, info, ["leverage"]));
-  if (leverage != null && leverage >= 1) add("Leverage", `${leverage}x`);
-  const margin = text(first(cfg, info, ["margin_mode", "marginMode"]));
-  const openType = num(first(info, cfg, ["open_type", "openType"]));
-  if (margin) add("Margin", margin.toUpperCase());
-  else if (openType === 1) add("Margin", "ISOLATED");
-  else if (openType === 2) add("Margin", "CROSS");
-
   const avg = num(first(info, cfg, [
     "average_fill_price",
     "avg_fill_price",
@@ -283,11 +273,6 @@ export function executorHoverModel(executor: ExecutorInfo, now = Date.now()): Ex
     "current_position_average_price",
   ]));
   if (avg != null && avg > 0) add("Avg fill", priceText(avg));
-
-  const realized = num(first(info, cfg, ["realized_pnl_quote", "realized_pnl"]));
-  const unrealized = num(first(info, cfg, ["unrealized_pnl_quote", "unrealized_pnl"]));
-  if (realized != null) add("Realized", money(realized));
-  if (unrealized != null) add("Unrealized", money(unrealized));
   if (num(executor.pnl) != null) add("Net PnL", money(Number(executor.pnl)));
 
   if (started != null) add("Started", formatStartMyt(started));

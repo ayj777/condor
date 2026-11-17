@@ -171,15 +171,12 @@ export function ExecutorDetailPopup({
       {model.orders.length > 0 && (
         <ul className="mt-1.5 space-y-1 border-t border-[var(--color-border)] pt-1.5">
           {model.orders.map((order, index) => (
-            <li key={`${order.exchangeId}-${order.price}-${index}`} className="font-mono text-[10px]">
+            <li key={`${order.price}-${order.amount}-${index}`} className="font-mono text-[10px]">
               <span className="text-[var(--color-text)]">
                 {order.price || "mkt"} · {order.amount || "?"}
                 {order.filled ? ` · filled ${order.filled}` : ""}
               </span>
-              <span className="block truncate text-[var(--color-text-muted)]">
-                {order.status}
-                {order.exchangeId ? ` · ${order.exchangeId}` : ""}
-              </span>
+              <span className="block truncate text-[var(--color-text-muted)]">{order.status}</span>
             </li>
           ))}
         </ul>
