@@ -56,10 +56,14 @@ async def apply_venue_account_settings(
 
     if matched is not None:
         current = _optional_float(matched.get("leverage"))
-        if current is not None and current >= 1:
-            # The executor confirms this number. It has to be the position's,
-            # not the form default, or the confirm moves the position.
-            config["leverage"] = int(current)
+        if current is None or current < 1:
+            # Range iceberg confirms whatever number is left in the config.
+            # An unread leverage cannot be told apart from the form default.
+            raise AccountSettingsError(
+                "Cannot read the leverage on the open "
+                f"{pair or connector} position, so the order was not sent."
+            )
+        config["leverage"] = int(current)
 
     if not profile.margin_modes:
         config.pop("margin_mode", None)
@@ -92,6 +96,10 @@ async def confirm_leverage(
     rows = await _open_rows(client, connector)
     matched = _match_row(rows, pair, side)
     current = _optional_float(matched.get("leverage")) if matched else None
+    if matched is not None and (current is None or current < 1):
+        raise AccountSettingsError(
+            "Cannot read the leverage on the open position, so it was not changed."
+        )
     if current is not None and int(current) == int(leverage):
         return
     await trading.set_leverage(account, connector, pair, int(leverage))
@@ -129,6 +137,11 @@ async def _apply_margin(
 ) -> bool:
     explicit = bool(config.get("margin_explicit"))
     requested = _margin_name(config.get("margin_mode")) if explicit else None
+    # The documented MEXC row has leverage and no margin field. An order that
+    # does not ask to change margin must not be refused for that absence.
+    if not explicit or requested is None:
+        config.pop("margin_mode", None)
+        return True
     if matched is not None:
         current = _margin_name(
             matched.get("margin_mode")
@@ -148,12 +161,9 @@ async def _apply_margin(
                 "Cannot read the margin mode on the open "
                 f"{pair or connector} position, so the order was not sent."
             )
-        if not explicit or requested is None or requested == current:
+        if requested == current:
             config.pop("margin_mode", None)
             return True
-    elif not explicit or requested is None:
-        config.pop("margin_mode", None)
-        return True
 
     applied = await _set_margin_mode(trading, account, connector, pair, requested or "")
     if not applied:

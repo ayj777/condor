@@ -17,7 +17,7 @@ import { usesLimitPrice, type OrderAction, type OrderState } from "./order-confi
 import { RangeIcebergFields } from "./RangeIcebergFields";
 import { floorBaseAmount, legalBaseAmount, percentBase, type SizeRule } from "@/lib/order-size";
 import { fallbackStrategy } from "@/lib/order-strategy";
-import { positionModeLabel, sideOptions, type OpenBook } from "@/lib/trade-guards";
+import { positionModeLabel, reducesOpen, resultingSize, sideOptions, type OpenBook } from "@/lib/trade-guards";
 
 // ── Execution strategy options ──
 
@@ -63,6 +63,8 @@ interface Props {
   openBook?: OpenBook | null;
   /** Sets leverage on its own. Create does not call this. */
   onApplyLeverage?: () => void;
+  /** False while the position book is still loading, so Apply cannot use a stale draft. */
+  positionsLoaded?: boolean;
   applyingLeverage?: boolean;
   /** True for the frame after a forced strategy change, so Create stays disabled. */
   onStrategyHold?: (held: boolean) => void;
@@ -94,6 +96,7 @@ export function OrderConfigPanel({
   openBook = null,
   onApplyLeverage,
   applyingLeverage = false,
+  positionsLoaded = false,
   onStrategyHold,
   baseAvailable = null,
   quoteAvailable = null,
@@ -209,7 +212,11 @@ export function OrderConfigPanel({
           )}
           {openBook && openBook.amount > 0 && snapped > 0 && (
             <p className="mt-1 text-[10px] text-[var(--color-text-muted)]">
-              After this order the position is {Number((openBook.amount + snapped).toPrecision(8))} {displayBase}.
+              After this order the position is {resultingSize(
+                openBook.amount,
+                snapped,
+                state.position_action === "CLOSE" || reducesOpen(state.side, openBook, positionMode),
+              )} {displayBase}.
             </p>
           )}
           {belowMin && (
@@ -257,7 +264,15 @@ export function OrderConfigPanel({
             <button
               type="button"
               onClick={() => onApplyLeverage?.()}
-              disabled={!onApplyLeverage || applyingLeverage || !(state.leverage >= 1)}
+              disabled={
+                !onApplyLeverage ||
+                applyingLeverage ||
+                !positionsLoaded ||
+                !(state.leverage >= 1) ||
+                !state.leverageTouched ||
+                (openBook != null && openBook.leverage == null) ||
+                (positionLeverage != null && state.leverage === positionLeverage)
+              }
               className="shrink-0 rounded border border-[var(--color-border)] px-2 py-1 text-[10px] text-[var(--color-text)] hover:bg-[var(--color-surface-hover)] disabled:opacity-50"
             >
               {applyingLeverage ? "Applying" : "Apply leverage"}
@@ -276,7 +291,7 @@ export function OrderConfigPanel({
             }))}
           />
         )}
-        {!isSpot && !isRange && (
+        {!isSpot && (
           <SelectField
             label="Position Action"
             value={state.position_action}

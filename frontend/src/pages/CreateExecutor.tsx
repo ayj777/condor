@@ -64,7 +64,7 @@ import {
 } from "@/lib/gridExecutor";
 import { formatConnectorName, formatPriceSig } from "@/lib/formatters";
 import { baseAmountError, legalBaseAmount } from "@/lib/order-size";
-import { applyClose, type OpenBook } from "@/lib/trade-guards";
+import { applyReducing, reducingCap, type OpenBook } from "@/lib/trade-guards";
 import { useViewFacts } from "@/lib/viewFacts";
 
 // ── Type tabs config ──
@@ -291,16 +291,20 @@ export function CreateExecutor() {
   }, [mainPositions]);
   const openLeverage = openBook?.leverage ?? null;
   const leverageSeeded = useRef("");
-  useEffect(() => {
-    if (!connector || !pair || openLeverage == null) return;
+  // During render, so the first click already has the open leverage and Apply
+  // cannot send the persisted draft on the frame before an effect runs.
+  if (connector && pair && openLeverage != null) {
     const key = `${connector}|${(pair || "").replaceAll("_", "-").toUpperCase()}|${openLeverage}`;
-    if (leverageSeeded.current === key) return;
-    leverageSeeded.current = key;
-    orderConfig.dispatch({ type: "ADOPT_LEVERAGE", value: openLeverage });
-    positionConfig.dispatch({ type: "ADOPT_LEVERAGE", value: openLeverage });
-    // dispatch is stable. Depending on the config object would re-seed every render.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [connector, pair, openLeverage]);
+    if (leverageSeeded.current !== key) {
+      leverageSeeded.current = key;
+      if (orderConfig.state.leverage !== openLeverage) {
+        orderConfig.dispatch({ type: "ADOPT_LEVERAGE", value: openLeverage });
+      }
+      if (positionConfig.state.leverage !== openLeverage) {
+        positionConfig.dispatch({ type: "ADOPT_LEVERAGE", value: openLeverage });
+      }
+    }
+  }
   const [strategyHold, setStrategyHold] = useState(false);
   useEffect(() => {
     if (!strategyHold) return;
@@ -672,6 +676,13 @@ export function CreateExecutor() {
   const leverageMutation = useMutation({
     mutationFn: () => {
       if (!server) throw new Error("No server");
+      if (isLoadingPositions) throw new Error("Wait until the open position is loaded");
+      if (openBook && openBook.leverage == null) {
+        throw new Error("Cannot read the open leverage, so it was not changed.");
+      }
+      if (openLeverage != null && orderConfig.state.leverage === openLeverage) {
+        throw new Error("That is already the open leverage.");
+      }
       if (!(orderConfig.state.leverage >= 1)) throw new Error("Leverage must be at least 1");
       return api.setAccountLeverage(server, {
         leverage: orderConfig.state.leverage,
@@ -694,6 +705,13 @@ export function CreateExecutor() {
 
       let payload: { executor_type: string; config: Record<string, unknown> };
 
+      const mode = positionModeQuery.data?.position_mode ?? "";
+      const cap = reducingCap(
+        openBook,
+        orderConfig.state.position_action,
+        orderConfig.state.side,
+        mode,
+      );
       switch (executorType) {
         case "grid":
           payload = gridConfig.buildPayload(connector, pair, isSpot);
@@ -706,10 +724,10 @@ export function CreateExecutor() {
           );
           break;
         case "order":
-          payload = orderConfig.buildPayload(connector, pair, isSpot);
+          payload = orderConfig.buildPayload(connector, pair, isSpot, false, cap);
           break;
         case "iceberg":
-          payload = orderConfig.buildPayload(connector, pair, isSpot, true);
+          payload = orderConfig.buildPayload(connector, pair, isSpot, true, cap);
           break;
         case "dca":
           payload = dcaConfig.buildPayload(connector, pair, isSpot);
@@ -721,7 +739,12 @@ export function CreateExecutor() {
       }
 
       if (executorType === "order" || executorType === "iceberg") {
-        const closeError = applyClose(payload.config, openBook, orderConfig.state.position_action);
+        const closeError = applyReducing(
+          payload.config,
+          openBook,
+          orderConfig.state.position_action,
+          positionModeQuery.data?.position_mode ?? "",
+        );
         if (closeError) throw new Error(closeError);
       }
       return api.createExecutor(server, payload);
@@ -1042,10 +1065,10 @@ export function CreateExecutor() {
                     <PositionConfigPanel state={positionConfig.state} dispatch={positionConfig.dispatch} validation={positionConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} />
                   )}
                   {executorType === "order" && (
-                    <OrderConfigPanel state={orderConfig.state} dispatch={orderConfig.dispatch} validation={orderConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} connector={connector} strategies={orderStrategies} marginModes={caps.marginModes} sizeRule={pairRule} positionLeverage={openLeverage} openBook={openBook} positionMode={positionModeQuery.data?.position_mode ?? ""} onApplyLeverage={() => leverageMutation.mutate()} applyingLeverage={leverageMutation.isPending} onStrategyHold={setStrategyHold} baseAvailable={balances.base} quoteAvailable={balances.quote} />
+                    <OrderConfigPanel state={orderConfig.state} dispatch={orderConfig.dispatch} validation={orderConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} connector={connector} strategies={orderStrategies} marginModes={caps.marginModes} sizeRule={pairRule} positionLeverage={openLeverage} openBook={openBook} positionMode={positionModeQuery.data?.position_mode ?? ""} onApplyLeverage={() => leverageMutation.mutate()} applyingLeverage={leverageMutation.isPending} positionsLoaded={!isLoadingPositions} onStrategyHold={setStrategyHold} baseAvailable={balances.base} quoteAvailable={balances.quote} />
                   )}
                   {executorType === "iceberg" && (
-                    <OrderConfigPanel state={orderConfig.state} dispatch={orderConfig.dispatch} validation={orderConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} connector={connector} strategies={orderStrategies} marginModes={caps.marginModes} sizeRule={pairRule} lockStrategy positionLeverage={openLeverage} openBook={openBook} positionMode={positionModeQuery.data?.position_mode ?? ""} onApplyLeverage={() => leverageMutation.mutate()} applyingLeverage={leverageMutation.isPending} baseAvailable={balances.base} quoteAvailable={balances.quote} />
+                    <OrderConfigPanel state={orderConfig.state} dispatch={orderConfig.dispatch} validation={orderConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} connector={connector} strategies={orderStrategies} marginModes={caps.marginModes} sizeRule={pairRule} lockStrategy positionLeverage={openLeverage} openBook={openBook} positionMode={positionModeQuery.data?.position_mode ?? ""} onApplyLeverage={() => leverageMutation.mutate()} applyingLeverage={leverageMutation.isPending} positionsLoaded={!isLoadingPositions} baseAvailable={balances.base} quoteAvailable={balances.quote} />
                   )}
                   {executorType === "dca" && (
                     <DCAConfigPanel state={dcaConfig.state} dispatch={dcaConfig.dispatch} validation={dcaConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} />

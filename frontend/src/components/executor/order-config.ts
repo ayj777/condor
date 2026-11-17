@@ -26,6 +26,8 @@ export interface OrderState {
   leverage: number;
   /** Kept so a saved form still loads. Create does not call set_leverage from it. */
   leverageExplicit: boolean;
+  /** True after the user types a leverage. Apply stays off until then. */
+  leverageTouched: boolean;
   /** True only after the user edits the margin mode. A default is not sent. */
   marginExplicit: boolean;
   chaser_distance: number;
@@ -82,6 +84,7 @@ export const ORDER_DEFAULTS: OrderState = {
   price: 0,
   leverage: 1,
   leverageExplicit: false,
+  leverageTouched: false,
   marginExplicit: false,
   chaser_distance: 0.0005,
   chaser_refresh_threshold: 0.001,
@@ -155,9 +158,8 @@ export function orderReducer(state: OrderState, action: OrderAction): OrderState
   switch (action.type) {
     case "SET_FIELD":
       if (action.field === "leverage") {
-        // Typing or a scroll wheel updates the draft only. Create does not
-        // call set_leverage, and the field itself ignores the wheel.
-        return { ...state, leverage: Number(action.value), leverageExplicit: false };
+        // Typing updates the draft only. Apply sends it, and only after this.
+        return { ...state, leverage: Number(action.value), leverageExplicit: false, leverageTouched: true };
       }
       if (action.field === "ri_margin_mode") {
         return {
@@ -175,7 +177,8 @@ export function orderReducer(state: OrderState, action: OrderAction): OrderState
       }
       return { ...state, [action.field]: action.value };
     case "ADOPT_LEVERAGE":
-      return { ...state, leverage: action.value, leverageExplicit: false };
+      if (state.leverage === action.value && !state.leverageTouched) return state;
+      return { ...state, leverage: action.value, leverageExplicit: false, leverageTouched: false };
     case "QUANTIZE": {
       const q = (value: number) => quantizePrice(value, action.increment);
       const next = {
@@ -375,7 +378,7 @@ export function useOrderConfig(sizeRule: SizeRule | null = null, baseSymbol = "b
     state.ri_limit_price,
   ]);
 
-  const buildPayload = (connector: string, pair: string, isSpot: boolean, asRange = false) => {
+  const buildPayload = (connector: string, pair: string, isSpot: boolean, asRange = false, maxBase = 0) => {
     const tick = sizeRule?.priceIncrement ?? 0;
     if (asRange || isRangeIceberg(state.execution_strategy)) {
       const input = rangeIcebergInput(state);
@@ -383,7 +386,13 @@ export function useOrderConfig(sizeRule: SizeRule | null = null, baseSymbol = "b
       input.priceHigh = quantizePrice(input.priceHigh, tick);
       input.limitPrice = quantizePrice(input.limitPrice, tick);
       if (state.position_action === "CLOSE") input.reduceOnly = true;
-      const sent = icebergSentSize(input, sizeRule, conversionPrice(state), state.ri_contracts_confirmed);
+      const sent = icebergSentSize(
+        input,
+        sizeRule,
+        conversionPrice(state),
+        state.ri_contracts_confirmed,
+        maxBase,
+      );
       if (!sent.error) {
         input.totalAmount = sent.total;
         input.sliceAmount = sent.perSlice;
@@ -395,7 +404,8 @@ export function useOrderConfig(sizeRule: SizeRule | null = null, baseSymbol = "b
       };
     }
 
-    const amount = legalBaseAmount(state.amount, sizeRule);
+    let amount = legalBaseAmount(state.amount, sizeRule);
+    if (maxBase > 0 && amount > maxBase) amount = legalBaseAmount(maxBase, sizeRule);
     const config: Record<string, unknown> = {
       connector_name: connector,
       trading_pair: pair,

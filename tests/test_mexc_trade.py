@@ -539,8 +539,8 @@ def test_mark_notional_and_a_missing_leverage_stay_honest():
     assert kept[0]["notional_value"] == 0.8
 
 
-def test_an_unreadable_margin_mode_refuses_the_create():
-    from condor.fetchers.account_settings import AccountSettingsError
+def test_a_live_row_without_margin_does_not_block_the_create():
+    from condor.fetchers.account_settings import AccountSettingsError, confirm_leverage
 
     trading = _Trading()
 
@@ -549,10 +549,10 @@ def test_an_unreadable_margin_mode_refuses_the_create():
             "data": [
                 {
                     "connector_name": "mexc_perpetual",
-                    "trading_pair": "AIOT-USDT",
-                    "side": "LONG",
-                    "amount": 60770,
-                    "leverage": 2,
+                    "trading_pair": "AIOT_USDT",
+                    "side": "PositionSide.LONG",
+                    "amount": "60770",
+                    "leverage": "2.0",
                 }
             ]
         }
@@ -560,20 +560,33 @@ def test_an_unreadable_margin_mode_refuses_the_create():
     trading.get_positions = get_positions
     client = FakeClient()
     client.trading = trading
+    config = {
+        "connector_name": "mexc_perpetual",
+        "trading_pair": "AIOT-USDT",
+        "side": 1,
+        "leverage": 1,
+        "margin_mode": "ISOLATED",
+    }
+    applied = asyncio.run(
+        apply_venue_account_settings(client, "master_account", config)
+    )
+    assert applied is True
+    assert config["leverage"] == 2
+    assert "margin_mode" not in config
+    assert trading.leverage_calls == []
+    assert trading.margin_calls == []
+
+    config["margin_mode"] = "CROSS"
+    config["margin_explicit"] = True
     with pytest.raises(AccountSettingsError) as caught:
         asyncio.run(
-            apply_venue_account_settings(
-                client,
-                "master_account",
-                {
-                    "connector_name": "mexc_perpetual",
-                    "trading_pair": "AIOT-USDT",
-                    "side": 1,
-                    "leverage": 2,
-                },
-            )
+            apply_venue_account_settings(client, "master_account", config)
         )
     assert "margin mode" in str(caught.value)
+
+    asyncio.run(
+        confirm_leverage(client, "master_account", "mexc_perpetual", "AIOT-USDT", 2, 1)
+    )
     assert trading.leverage_calls == []
 
 

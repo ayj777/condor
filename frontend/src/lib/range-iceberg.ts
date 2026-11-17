@@ -183,6 +183,7 @@ export function icebergSentSize(
   rule: SizeRule | null,
   price: number,
   contractsConfirmed: boolean,
+  maxBase = 0,
 ): IcebergSent {
   const raw = rangeIcebergPreview(input);
   if (!raw) {
@@ -203,6 +204,7 @@ export function icebergSentSize(
     }
     baseTotal = input.totalAmount / price;
   }
+  if (maxBase > 0 && baseTotal > maxBase) baseTotal = maxBase;
   const step = input.sizeUnit === "CONTRACTS" ? 1 : rule?.increment ?? 0;
   const min = input.sizeUnit === "CONTRACTS" ? 1 : rule?.minOrderSize ?? 0;
   if (!(step > 0)) {

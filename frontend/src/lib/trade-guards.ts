@@ -19,6 +19,57 @@ export interface PositionRow {
   margin_mode?: string | null;
 }
 
+export function isOneWay(mode: string): boolean {
+  const name = mode.toUpperCase();
+  return name === "ONEWAY" || name === "ONE_WAY";
+}
+
+/** A one-way sell against a long, or a buy against a short, reduces that book. */
+export function reducesOpen(side: unknown, book: OpenBook | null, mode: string): boolean {
+  if (!isOneWay(mode) || !book || !(book.amount > 0)) return false;
+  const text = String(side ?? "").toUpperCase();
+  const selling = text === "2" || text === "SELL" || text === "SHORT";
+  const buying = text === "1" || text === "BUY" || text === "LONG";
+  if (book.side === "LONG" && selling) return true;
+  if (book.side === "SHORT" && buying) return true;
+  return false;
+}
+
+/** Base cap for a close or a one-way reducing order. Zero means no cap. */
+export function reducingCap(
+  book: OpenBook | null,
+  action: string,
+  side: unknown,
+  mode: string,
+): number {
+  if (!book || !(book.amount > 0)) return 0;
+  if (action === "CLOSE" || reducesOpen(side, book, mode)) return book.amount;
+  return 0;
+}
+
+/** Close, or a one-way order that reduces the open book, is reduce-only and capped. */
+export function applyReducing(
+  config: Record<string, unknown>,
+  book: OpenBook | null,
+  action: string,
+  mode: string,
+): string | null {
+  if (action === "CLOSE") return applyClose(config, book, action);
+  if (!reducesOpen(config.side, book, mode) || !book) return null;
+  config.reduce_only = true;
+  for (const key of ["amount", "total_amount"] as const) {
+    if (key === "total_amount" && config.size_unit === "QUOTE") continue;
+    const value = config[key];
+    if (typeof value === "number" && value > book.amount) config[key] = book.amount;
+  }
+  return null;
+}
+
+export function resultingSize(open: number, order: number, reducing: boolean): number {
+  const next = reducing ? Math.max(0, open - order) : open + order;
+  return Number(next.toPrecision(12));
+}
+
 /** Close sends a reduce-only order, and never more than the open amount. */
 export function applyClose(
   config: Record<string, unknown>,

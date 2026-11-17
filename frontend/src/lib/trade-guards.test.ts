@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { fallbackStrategy } from "./order-strategy";
 import { icebergSentSize, type RangeIcebergInput } from "./range-iceberg";
-import { applyClose, defaultKeepPosition, rowsForPane, sideOptions } from "./trade-guards";
+import { applyClose, applyReducing, defaultKeepPosition, resultingSize, rowsForPane, sideOptions } from "./trade-guards";
 
 const input = (patch: Partial<RangeIcebergInput> = {}): RangeIcebergInput => ({
   side: "BUY",
@@ -46,6 +46,20 @@ describe("review guards", () => {
     expect(sent.total).toBeLessThanOrEqual(60770);
   });
 
+  it("caps the total before flooring each child", () => {
+    const sent = icebergSentSize(
+      input({ totalAmount: 100000 }),
+      { minOrderSize: 10, increment: 10 },
+      0.08,
+      false,
+      60770,
+    );
+    expect(sent.error).toBeNull();
+    expect(sent.perSlice).toBe(6070);
+    expect(sent.total).toBe(60700);
+    expect(sent.sliceCount).toBe(10);
+  });
+
   it("blocks contracts until they are confirmed", () => {
     const blocked = icebergSentSize(input({ sizeUnit: "CONTRACTS", totalAmount: 15 }), null, 0, false);
     expect(blocked.error).toMatch(/contracts/i);
@@ -72,6 +86,16 @@ describe("review guards", () => {
     expect(config.reduce_only).toBe(true);
     expect(config.side).toBe(2);
     expect(config.amount).toBe(60770);
+  });
+
+  it("caps a one-way sell and subtracts it from the long", () => {
+    const book = { amount: 60770, side: "LONG" as const, leverage: 2, marginMode: null };
+    const config: Record<string, unknown> = { side: 2, amount: 100000 };
+    expect(applyReducing(config, book, "OPEN", "ONEWAY")).toBeNull();
+    expect(config.reduce_only).toBe(true);
+    expect(config.amount).toBe(60770);
+    expect(resultingSize(60770, 1000, true)).toBe(59770);
+    expect(resultingSize(60770, 1000, false)).toBe(61770);
   });
 
   it("names a one-way sell and keeps a venue position by default", () => {
