@@ -90,11 +90,14 @@ describe("range iceberg", () => {
       iceberg: true,
       visible_count: 2,
       leverage: 2,
-      margin_mode: "ISOLATED",
       reduce_only: false,
       min_order_interval: 0.6,
     });
     expect(config.duration).toBeUndefined();
     expect(config.price_low).toBeUndefined();
+    expect(config.margin_mode).toBeUndefined();
+    expect(rangeIcebergConfig(input(), "mexc_perpetual", "AIOT-USDT", true).margin_mode).toBe(
+      "ISOLATED",
+    );
   });
 });

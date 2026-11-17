@@ -3,13 +3,14 @@
 // See position-config.ts: state and reducer live beside the panel, not inside
 // it, so this module can export what the page and the tests reach for.
 
-import { useMemo, useReducer } from "react";
+import { useEffect, useMemo, useReducer } from "react";
 
 import type { ChartPriceMapping, ExecutorValidation, PickSlot } from "./types";
 import { loadPersistedDefaults, savePersistedDefaults } from "./persisted-defaults";
 import { ORDER_DEFAULTS_KEY } from "@/lib/sessionState";
-import { legalBaseAmount, type SizeRule } from "@/lib/order-size";
+import { legalBaseAmount, quantizePrice, type SizeRule } from "@/lib/order-size";
 import {
+  icebergSentSize,
   rangeIcebergConfig,
   validateRangeIceberg,
   type RangeIcebergInput,
@@ -23,8 +24,10 @@ export interface OrderState {
   execution_strategy: string;
   price: number;
   leverage: number;
-  /** True only after the user edits leverage. A seeded value must not call set_leverage. */
+  /** Kept so a saved form still loads. Create does not call set_leverage from it. */
   leverageExplicit: boolean;
+  /** True only after the user edits the margin mode. A default is not sent. */
+  marginExplicit: boolean;
   chaser_distance: number;
   chaser_refresh_threshold: number;
   position_action: string;
@@ -48,6 +51,8 @@ export interface OrderState {
   ri_cap_behavior: "REST_AT_CAP" | "WAIT";
   ri_margin_mode: "ISOLATED" | "CROSS";
   ri_reduce_only: boolean;
+  /** A second confirm, required before a CONTRACTS size is sent. Not persisted. */
+  ri_contracts_confirmed: boolean;
   ri_distribution: "LINEAR" | "GEOMETRIC" | "WEIGHTED";
   ri_weight: number;
   ri_post_only: boolean;
@@ -67,7 +72,8 @@ export type OrderAction =
   | { type: "SET_CONNECTOR"; value: string }
   | { type: "SET_PAIR"; value: string }
   | { type: "ANCHOR"; price: number }
-  | { type: "ADOPT_LEVERAGE"; value: number };
+  | { type: "ADOPT_LEVERAGE"; value: number }
+  | { type: "QUANTIZE"; increment: number };
 
 export const ORDER_DEFAULTS: OrderState = {
   side: 1,
@@ -76,6 +82,7 @@ export const ORDER_DEFAULTS: OrderState = {
   price: 0,
   leverage: 1,
   leverageExplicit: false,
+  marginExplicit: false,
   chaser_distance: 0.0005,
   chaser_refresh_threshold: 0.001,
   position_action: "OPEN",
@@ -98,6 +105,7 @@ export const ORDER_DEFAULTS: OrderState = {
   ri_cap_behavior: "REST_AT_CAP",
   ri_margin_mode: "ISOLATED",
   ri_reduce_only: false,
+  ri_contracts_confirmed: false,
   ri_distribution: "LINEAR",
   ri_weight: 0,
   ri_post_only: false,
@@ -147,16 +155,46 @@ export function orderReducer(state: OrderState, action: OrderAction): OrderState
   switch (action.type) {
     case "SET_FIELD":
       if (action.field === "leverage") {
+        // Typing or a scroll wheel updates the draft only. Create does not
+        // call set_leverage, and the field itself ignores the wheel.
+        return { ...state, leverage: Number(action.value), leverageExplicit: false };
+      }
+      if (action.field === "ri_margin_mode") {
         return {
           ...state,
-          leverage: Number(action.value),
-          leverageExplicit: true,
+          ri_margin_mode: action.value as OrderState["ri_margin_mode"],
+          marginExplicit: true,
+        };
+      }
+      if (action.field === "ri_size_unit") {
+        return {
+          ...state,
+          ri_size_unit: action.value as OrderState["ri_size_unit"],
+          ri_contracts_confirmed: false,
         };
       }
       return { ...state, [action.field]: action.value };
     case "ADOPT_LEVERAGE":
-      if (state.leverageExplicit) return state;
-      return { ...state, leverage: action.value };
+      return { ...state, leverage: action.value, leverageExplicit: false };
+    case "QUANTIZE": {
+      const q = (value: number) => quantizePrice(value, action.increment);
+      const next = {
+        ...state,
+        price: q(state.price),
+        ri_price_low: q(state.ri_price_low),
+        ri_price_high: q(state.ri_price_high),
+        ri_limit_price: q(state.ri_limit_price),
+      };
+      if (
+        next.price === state.price &&
+        next.ri_price_low === state.ri_price_low &&
+        next.ri_price_high === state.ri_price_high &&
+        next.ri_limit_price === state.ri_limit_price
+      ) {
+        return state;
+      }
+      return next;
+    }
     case "SET_CONNECTOR":
     case "SET_PAIR":
       return { ...clearedPrices(state), leverageExplicit: false };
@@ -164,16 +202,10 @@ export function orderReducer(state: OrderState, action: OrderAction): OrderState
       if (state.anchored) return state;
       // Filled whatever the strategy is: a market order hides the field, but
       // switching to LIMIT afterwards should find a price already on the chart.
-      const price = state.price > 0 ? state.price : parseFloat(action.price.toPrecision(6));
-      const low = state.ri_price_low > 0
-        ? state.ri_price_low
-        : parseFloat((action.price * 0.99).toPrecision(6));
-      const high = state.ri_price_high > 0
-        ? state.ri_price_high
-        : parseFloat((action.price * 1.01).toPrecision(6));
-      const limit = state.ri_limit_price > 0
-        ? state.ri_limit_price
-        : parseFloat(action.price.toPrecision(6));
+      const price = state.price > 0 ? state.price : action.price;
+      const low = state.ri_price_low > 0 ? state.ri_price_low : action.price * 0.99;
+      const high = state.ri_price_high > 0 ? state.ri_price_high : action.price * 1.01;
+      const limit = state.ri_limit_price > 0 ? state.ri_limit_price : action.price;
       return {
         ...state,
         price,
@@ -239,18 +271,21 @@ export function useOrderValidation(
   baseSymbol = "base",
 ): ExecutorValidation {
   return useMemo(() => {
+    if (state.leverage < 1) {
+      return { valid: false, errors: ["Leverage must be at least 1"] };
+    }
     if (isRangeIceberg(state.execution_strategy)) {
       const input = rangeIcebergInput(state);
-      if (input.sizeUnit === "BASE" && sizeRule && input.totalAmount > 0) {
-        input.totalAmount = legalBaseAmount(input.totalAmount, sizeRule);
-      }
+      const sent = icebergSentSize(
+        input,
+        sizeRule,
+        conversionPrice(state),
+        state.ri_contracts_confirmed,
+      );
+      if (sent.error) return { valid: false, errors: [sent.error] };
+      input.totalAmount = sent.total;
       const message = validateRangeIceberg(input);
-      const sized =
-        input.sizeUnit === "BASE"
-          ? baseAmountMessage(state.ri_total_amount, sizeRule, baseSymbol)
-          : null;
-      const error = sized ?? message;
-      return { valid: error == null, errors: error ? [error] : [] };
+      return { valid: message == null, errors: message ? [message] : [] };
     }
     const errors: string[] = [];
     const sized = baseAmountMessage(state.amount, sizeRule, baseSymbol);
@@ -264,6 +299,11 @@ export function useOrderValidation(
     }
     return { valid: errors.length === 0, errors };
   }, [state, sizeRule, baseSymbol]);
+}
+
+function conversionPrice(state: OrderState): number {
+  if (state.ri_mode === "UP_TO") return state.ri_limit_price;
+  return Math.max(state.ri_price_low, state.ri_price_high);
 }
 
 function baseAmountMessage(
@@ -284,6 +324,11 @@ function baseAmountMessage(
 
 export function useOrderConfig(sizeRule: SizeRule | null = null, baseSymbol = "base") {
   const [state, dispatch] = useReducer(orderReducer, undefined, loadSavedDefaults);
+  const priceIncrement = sizeRule?.priceIncrement ?? 0;
+  useEffect(() => {
+    if (!(priceIncrement > 0)) return;
+    dispatch({ type: "QUANTIZE", increment: priceIncrement });
+  }, [priceIncrement, state.price, state.ri_price_low, state.ri_price_high, state.ri_limit_price]);
   const validation = useOrderValidation(state, sizeRule, baseSymbol);
 
   const chartProps: ChartPriceMapping = useMemo(() => {
@@ -331,15 +376,19 @@ export function useOrderConfig(sizeRule: SizeRule | null = null, baseSymbol = "b
   ]);
 
   const buildPayload = (connector: string, pair: string, isSpot: boolean, asRange = false) => {
+    const tick = sizeRule?.priceIncrement ?? 0;
     if (asRange || isRangeIceberg(state.execution_strategy)) {
       const input = rangeIcebergInput(state);
-      if (!isSpot) input.leverage = state.leverage;
-      if (input.sizeUnit === "BASE") {
-        input.totalAmount = legalBaseAmount(input.totalAmount, sizeRule);
-        if (input.sliceAmount > 0) input.sliceAmount = legalBaseAmount(input.sliceAmount, sizeRule);
+      input.priceLow = quantizePrice(input.priceLow, tick);
+      input.priceHigh = quantizePrice(input.priceHigh, tick);
+      input.limitPrice = quantizePrice(input.limitPrice, tick);
+      if (state.position_action === "CLOSE") input.reduceOnly = true;
+      const sent = icebergSentSize(input, sizeRule, conversionPrice(state), state.ri_contracts_confirmed);
+      if (!sent.error) {
+        input.totalAmount = sent.total;
+        input.sliceAmount = sent.perSlice;
       }
-      const config = rangeIcebergConfig(input, connector, pair);
-      if (state.leverageExplicit) config.leverage_explicit = true;
+      const config = rangeIcebergConfig(input, connector, pair, state.marginExplicit && !isSpot);
       return {
         executor_type: "range_iceberg_executor" as const,
         config,
@@ -357,7 +406,7 @@ export function useOrderConfig(sizeRule: SizeRule | null = null, baseSymbol = "b
     };
 
     if (usesLimitPrice(state.execution_strategy)) {
-      config.price = state.price;
+      config.price = quantizePrice(state.price, tick);
     }
     if (state.execution_strategy === "LIMIT_CHASER") {
       config.chaser_config = {
@@ -368,12 +417,12 @@ export function useOrderConfig(sizeRule: SizeRule | null = null, baseSymbol = "b
     if (state.position_action !== "OPEN") {
       config.position_action = state.position_action;
     }
-    // Sent so the route can set it on the account. The route strips it from
-    // an order executor, whose config model does not declare the field.
-    if (!isSpot && state.ri_margin_mode) {
+    // Margin is sent only after the user edits it. The route still drops it
+    // unless that edit differs from the open position.
+    if (!isSpot && state.marginExplicit) {
       config.margin_mode = state.ri_margin_mode;
+      config.margin_explicit = true;
     }
-    if (state.leverageExplicit) config.leverage_explicit = true;
 
     return { executor_type: "order_executor" as const, config };
   };

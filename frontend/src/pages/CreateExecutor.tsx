@@ -64,6 +64,7 @@ import {
 } from "@/lib/gridExecutor";
 import { formatConnectorName, formatPriceSig } from "@/lib/formatters";
 import { baseAmountError, legalBaseAmount } from "@/lib/order-size";
+import { applyClose, type OpenBook } from "@/lib/trade-guards";
 import { useViewFacts } from "@/lib/viewFacts";
 
 // ── Type tabs config ──
@@ -261,6 +262,7 @@ export function CreateExecutor() {
     return {
       minOrderSize: rule.min_order_size,
       increment: rule.min_base_amount_increment,
+      priceIncrement: rule.min_price_increment,
       orderTypes: rule.supported_order_types ?? [],
     };
   }, [rulesData, pair]);
@@ -274,14 +276,24 @@ export function CreateExecutor() {
   if (executorType === "iceberg" && orderConfig.state.execution_strategy !== "RANGE_ICEBERG") {
     orderConfig.dispatch({ type: "SET_FIELD", field: "execution_strategy", value: "RANGE_ICEBERG" });
   }
-  const openLeverage = useMemo(() => {
-    const held = mainPositions.find((p) => Math.abs(p.amount) > 0 && (p.leverage ?? 0) >= 1);
-    return held?.leverage ?? null;
+  const openBook = useMemo((): OpenBook | null => {
+    const live = mainPositions.filter((p) => Math.abs(p.amount) > 0);
+    const row = live.find((p) => p.source === "venue") ?? live[0];
+    if (!row) return null;
+    const name = (row.position_side || "").toUpperCase();
+    const side = name === "SHORT" || name === "SELL" ? "SHORT" : name === "LONG" || name === "BUY" ? "LONG" : "";
+    return {
+      amount: Math.abs(row.amount),
+      side,
+      leverage: row.leverage != null && row.leverage >= 1 ? row.leverage : null,
+      marginMode: row.margin_mode ?? null,
+    };
   }, [mainPositions]);
+  const openLeverage = openBook?.leverage ?? null;
   const leverageSeeded = useRef("");
   useEffect(() => {
-    const key = `${connector}|${(pair || "").replaceAll("_", "-").toUpperCase()}`;
     if (!connector || !pair || openLeverage == null) return;
+    const key = `${connector}|${(pair || "").replaceAll("_", "-").toUpperCase()}|${openLeverage}`;
     if (leverageSeeded.current === key) return;
     leverageSeeded.current = key;
     orderConfig.dispatch({ type: "ADOPT_LEVERAGE", value: openLeverage });
@@ -289,6 +301,24 @@ export function CreateExecutor() {
     // dispatch is stable. Depending on the config object would re-seed every render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [connector, pair, openLeverage]);
+  const [strategyHold, setStrategyHold] = useState(false);
+  useEffect(() => {
+    if (!strategyHold) return;
+    const frame = requestAnimationFrame(() => setStrategyHold(false));
+    return () => cancelAnimationFrame(frame);
+  }, [strategyHold, orderConfig.state.execution_strategy]);
+  const positionModeQuery = useQuery({
+    queryKey: ["position-mode", server, connector],
+    queryFn: () => api.getPositionMode(server!, connector),
+    enabled: !!server && !!connector && !isSpot,
+    retry: false,
+  });
+  const ordersHealth = useQuery({
+    queryKey: ["active-orders", server, connector, pair],
+    queryFn: () => api.getActiveOrders(server!, connector, pair),
+    enabled: !!server && !!connector && !!pair,
+    retry: false,
+  });
 
   const orderStrategies = useMemo(() => {
     const listed = pairRule?.orderTypes ?? [];
@@ -639,6 +669,19 @@ export function CreateExecutor() {
     [executorType],
   );
 
+  const leverageMutation = useMutation({
+    mutationFn: () => {
+      if (!server) throw new Error("No server");
+      if (!(orderConfig.state.leverage >= 1)) throw new Error("Leverage must be at least 1");
+      return api.setAccountLeverage(server, {
+        leverage: orderConfig.state.leverage,
+        connector_name: connector,
+        trading_pair: pair,
+        side: orderConfig.state.side,
+      });
+    },
+  });
+
   // Create mutation
   const createMutation = useMutation({
     mutationFn: () => {
@@ -661,9 +704,6 @@ export function CreateExecutor() {
             Number(payload.config.amount) || 0,
             pairRule,
           );
-          if (!isSpot && orderConfig.state.ri_margin_mode) {
-            payload.config.margin_mode = orderConfig.state.ri_margin_mode;
-          }
           break;
         case "order":
           payload = orderConfig.buildPayload(connector, pair, isSpot);
@@ -680,6 +720,10 @@ export function CreateExecutor() {
           break;
       }
 
+      if (executorType === "order" || executorType === "iceberg") {
+        const closeError = applyClose(payload.config, openBook, orderConfig.state.position_action);
+        if (closeError) throw new Error(closeError);
+      }
       return api.createExecutor(server, payload);
     },
     onSuccess: (data) => {
@@ -694,11 +738,8 @@ export function CreateExecutor() {
       }
       // Show success modal
       const notice =
-        data.margin_mode_applied === false &&
-        executorType !== "iceberg" &&
-        orderConfig.state.execution_strategy !== "RANGE_ICEBERG" &&
-        orderConfig.state.ri_margin_mode !== "ISOLATED"
-          ? "This API has no margin-mode route, so the order uses the connector's current margin mode. Range iceberg confirms margin on the exchange."
+        data.margin_mode_applied === false
+          ? "The requested margin mode was not applied. The order uses the connector's current margin mode."
           : undefined;
       setSuccessInfo({ id: data.executor_id, type: executorType, connector, pair, notice });
       // Invalidate executor queries so the new one appears immediately
@@ -1001,10 +1042,10 @@ export function CreateExecutor() {
                     <PositionConfigPanel state={positionConfig.state} dispatch={positionConfig.dispatch} validation={positionConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} />
                   )}
                   {executorType === "order" && (
-                    <OrderConfigPanel state={orderConfig.state} dispatch={orderConfig.dispatch} validation={orderConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} connector={connector} strategies={orderStrategies} marginModes={caps.marginModes} sizeRule={pairRule} positionLeverage={openLeverage} baseAvailable={balances.base} quoteAvailable={balances.quote} />
+                    <OrderConfigPanel state={orderConfig.state} dispatch={orderConfig.dispatch} validation={orderConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} connector={connector} strategies={orderStrategies} marginModes={caps.marginModes} sizeRule={pairRule} positionLeverage={openLeverage} openBook={openBook} positionMode={positionModeQuery.data?.position_mode ?? ""} onApplyLeverage={() => leverageMutation.mutate()} applyingLeverage={leverageMutation.isPending} onStrategyHold={setStrategyHold} baseAvailable={balances.base} quoteAvailable={balances.quote} />
                   )}
                   {executorType === "iceberg" && (
-                    <OrderConfigPanel state={orderConfig.state} dispatch={orderConfig.dispatch} validation={orderConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} connector={connector} strategies={orderStrategies} marginModes={caps.marginModes} sizeRule={pairRule} lockStrategy positionLeverage={openLeverage} baseAvailable={balances.base} quoteAvailable={balances.quote} />
+                    <OrderConfigPanel state={orderConfig.state} dispatch={orderConfig.dispatch} validation={orderConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} connector={connector} strategies={orderStrategies} marginModes={caps.marginModes} sizeRule={pairRule} lockStrategy positionLeverage={openLeverage} openBook={openBook} positionMode={positionModeQuery.data?.position_mode ?? ""} onApplyLeverage={() => leverageMutation.mutate()} applyingLeverage={leverageMutation.isPending} baseAvailable={balances.base} quoteAvailable={balances.quote} />
                   )}
                   {executorType === "dca" && (
                     <DCAConfigPanel state={dcaConfig.state} dispatch={dcaConfig.dispatch} validation={dcaConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} />
@@ -1023,7 +1064,7 @@ export function CreateExecutor() {
                   )}
                   <button
                     onClick={() => createMutation.mutate()}
-                    disabled={!caps.canTrade || !activeValidation.valid || createMutation.isPending}
+                    disabled={!caps.canTrade || !activeValidation.valid || createMutation.isPending || ordersHealth.isError || strategyHold || (executorType === "order" && !orderStrategies.includes(orderConfig.state.execution_strategy))}
                     className="flex w-full items-center justify-center gap-2 rounded-lg bg-[var(--color-primary)] px-4 py-2.5 text-sm font-bold text-white transition-colors hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     {createMutation.isPending ? (

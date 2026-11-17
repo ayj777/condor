@@ -91,6 +91,19 @@ def trading_profile(name: str) -> TradingProfile | None:
     return TRADING_PROFILES.get(key) or TRADING_PROFILES.get(key.lower())
 
 
+def perpetual_for_closeout(name: str) -> bool:
+    """Perp check for closeout and drift.
+
+    A recorded profile wins. A name with no profile keeps the old predicate:
+    the case-sensitive substring ``_perpetual``. A ``_perp`` suffix is not
+    enough, which is what those two checks required before profiles existed.
+    """
+    profile = trading_profile(name)
+    if profile is not None:
+        return profile.perpetual
+    return "_perpetual" in (name or "")
+
+
 def is_perpetual_connector(name: str) -> bool:
     """Whether ``name`` is a perpetual venue.
 

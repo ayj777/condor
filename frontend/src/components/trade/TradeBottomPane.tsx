@@ -16,10 +16,17 @@ import {
   pnlTextClass,
   isExecutorActive,
 } from "@/lib/formatters";
-import { executorRunDetail, executorTypeLabel } from "@/lib/executor-run";
+import { childOrderIds, executorRunDetail, executorTypeLabel } from "@/lib/executor-run";
 import { stopKeepCopy } from "@/lib/executorStopCopy";
+import { defaultKeepPosition } from "@/lib/trade-guards";
 import { executorsQuery } from "@/lib/queryClient";
 import { TRADE_BOTTOM_PANE_KEY } from "@/lib/sessionState";
+
+function stopCloseLine(ex: ExecutorInfo | undefined): string {
+  const filled = Number(ex?.custom_info?.filled_amount);
+  const size = Number.isFinite(filled) && filled > 0 ? String(filled) : "only what it filled";
+  return `The executor stops and sells ${size} base, reduce-only. It will not sell more than it filled.`;
+}
 
 interface TradeBottomPaneProps {
   executors: ExecutorInfo[];
@@ -155,7 +162,7 @@ function ExecutorTooltip({
               <span className="font-mono">{formatUsd(amount)}</span>
             </div>
           )}
-          {leverage > 1 && (
+          {Number.isFinite(leverage) && leverage >= 1 && (
             <div>
               <span className="text-[var(--color-text-muted)]">Leverage: </span>
               <span className="font-mono">{leverage}x</span>
@@ -257,7 +264,8 @@ export function TradeBottomPane({
   const [tab, setTab] = useState<"executors" | "positions" | "orders">("executors");
   const [stoppingIds, setStoppingIds] = useState<Set<string>>(new Set());
   const [confirmStopId, setConfirmStopId] = useState<string | null>(null);
-  const [keepPosition, setKeepPosition] = useState(false);
+  const [keepPosition, setKeepPosition] = useState(true);
+  const [confirmResumeId, setConfirmResumeId] = useState<string | null>(null);
   const [confirmClearPos, setConfirmClearPos] = useState<ConsolidatedPosition | null>(null);
   const [clearingPositions, setClearingPositions] = useState<Set<string>>(new Set());
   const [hoveredExecutor, setHoveredExecutor] = useState<{ executor: ExecutorInfo; rect: DOMRect } | null>(null);
@@ -318,10 +326,18 @@ export function TradeBottomPane({
     queryFn: () => api.getActiveOrders(server!, connector, pair),
     enabled: !!server && showOrders && expanded,
     refetchInterval: expanded && showOrders ? 5_000 : false,
+    retry: false,
   });
   const openOrders = ordersQuery.data?.orders ?? [];
+  const resumeSupport = useQuery({
+    queryKey: ["resume-supported", server],
+    queryFn: () => api.resumeSupported(server!),
+    enabled: !!server,
+    retry: false,
+  });
   const cancelMutation = useMutation({
-    mutationFn: (orderId: string) => api.cancelOrder(server!, connector, orderId),
+    mutationFn: ({ orderId, account }: { orderId: string; account?: string | null }) =>
+      api.cancelOrder(server!, connector, orderId, account),
     onSettled: () => {
       queryClient.invalidateQueries({ queryKey: ["active-orders", server, connector, pair] });
     },
@@ -350,10 +366,16 @@ export function TradeBottomPane({
     },
   });
 
+  const venueAmount = useMemo(
+    () => positions.reduce((max, pos) => (
+      pos.source === "venue" ? Math.max(max, Math.abs(pos.amount)) : max
+    ), 0),
+    [positions],
+  );
   const handleStop = useCallback((id: string) => {
-    setKeepPosition(false);
+    setKeepPosition(defaultKeepPosition(venueAmount));
     setConfirmStopId(id);
-  }, []);
+  }, [venueAmount]);
 
   const handleRowClick = useCallback(
     (ex: ExecutorInfo) => {
@@ -608,6 +630,7 @@ export function TradeBottomPane({
                                   {detail.halt && (
                                     <span className="text-[9px] text-[var(--color-red)]" title={detail.halt}>
                                       {detail.halt}
+                                      {childOrderIds(ex).length > 0 ? ` (${childOrderIds(ex).join(", ")})` : ""}
                                     </span>
                                   )}
                                 </div>
@@ -642,9 +665,9 @@ export function TradeBottomPane({
                             </span>
                           </td>
                           <td className="px-2 py-1.5 text-center" onClick={(e) => e.stopPropagation()}>
-                            {active && executorRunDetail(ex).canResume && (
+                            {active && resumeSupport.data?.supported === true && executorRunDetail(ex).canResume && (
                               <button
-                                onClick={() => resumeMutation.mutate(ex.id)}
+                                onClick={() => setConfirmResumeId(ex.id)}
                                 disabled={resumeMutation.isPending}
                                 className="rounded p-0.5 text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-primary)]/20 hover:text-[var(--color-primary)] disabled:opacity-50"
                                 title="Resume executor"
@@ -679,6 +702,10 @@ export function TradeBottomPane({
               <div className="space-y-1 p-2">
                 {ordersQuery.isLoading ? (
                   <p className="py-3 text-center text-[var(--color-text-muted)]">Loading orders...</p>
+                ) : ordersQuery.isError ? (
+                  <p className="py-3 text-center text-[var(--color-red)]">
+                    {(ordersQuery.error as Error).message || "Could not load open orders"}
+                  </p>
                 ) : openOrders.length === 0 ? (
                   <p className="py-3 text-center text-[var(--color-text-muted)]">No open orders for this pair</p>
                 ) : (
@@ -694,7 +721,10 @@ export function TradeBottomPane({
                         <span className="text-[var(--color-text-muted)]">{order.order_type}</span>
                       </div>
                       <button
-                        onClick={() => cancelMutation.mutate(order.client_order_id)}
+                        onClick={() => cancelMutation.mutate({
+                          orderId: order.client_order_id,
+                          account: order.account_name,
+                        })}
                         disabled={cancelMutation.isPending || !order.client_order_id}
                         className="rounded px-1.5 py-0.5 text-[10px] text-[var(--color-text-muted)] hover:bg-[var(--color-red)]/20 hover:text-[var(--color-red)] disabled:opacity-50"
                       >
@@ -766,7 +796,7 @@ export function TradeBottomPane({
                                 Now: {formatPriceSig(pos.current_price)}
                               </span>
                             )}
-                            {pos.leverage > 1 && (
+                            {pos.leverage != null && pos.leverage >= 1 && (
                               <span className="text-[10px] text-[var(--color-text-muted)]">{formatLeverage(pos.leverage)}x</span>
                             )}
                             <span className={`font-mono font-medium ${pnlTextClass(pos.unrealized_pnl)}`}>
@@ -819,6 +849,34 @@ export function TradeBottomPane({
         />
       )}
 
+      {confirmResumeId && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+          <div className="max-w-sm rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4 shadow-xl">
+            <p className="text-sm text-[var(--color-text)]">Resume this executor?</p>
+            <p className="mt-1 text-[11px] text-[var(--color-text-muted)]">
+              Child orders: {childOrderIds(executors.find((ex) => ex.id === confirmResumeId)).join(", ") || "none listed"}
+            </p>
+            <div className="mt-3 flex justify-end gap-2">
+              <button
+                onClick={() => setConfirmResumeId(null)}
+                className="rounded px-3 py-1.5 text-xs text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => {
+                  resumeMutation.mutate(confirmResumeId);
+                  setConfirmResumeId(null);
+                }}
+                className="rounded bg-[var(--color-primary)] px-3 py-1.5 text-xs font-medium text-white"
+              >
+                Resume
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Stop confirmation */}
       {confirmStopId && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
@@ -836,7 +894,7 @@ export function TradeBottomPane({
               <span className="text-xs text-[var(--color-text)]">{stopCopy.label}</span>
             </label>
             <p className="mt-1 ml-6 text-[11px] text-[var(--color-text-muted)]">
-              {keepPosition ? stopCopy.checked : stopCopy.unchecked}
+              {keepPosition ? stopCopy.checked : stopCloseLine(executors.find((ex) => ex.id === confirmStopId))}
             </p>
             <div className="mt-3 flex justify-end gap-2">
               <button

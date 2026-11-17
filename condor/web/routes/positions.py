@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 
 from condor.fetchers.market_data import fetch_current_price
 from condor.server_data_service import ServerDataType, get_server_data_service
@@ -32,6 +32,38 @@ def _first_number(*values: object, default: float = 0.0) -> float:
     return default
 
 
+def _optional_number(value: object) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
+def _margin_label(value: object) -> str | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)) or (
+        isinstance(value, str) and str(value).strip().isdigit()
+    ):
+        number = int(float(value))
+        if number == 1:
+            return "ISOLATED"
+        if number == 2:
+            return "CROSS"
+        return None
+    text = str(value).strip()
+    if "." in text:
+        text = text.rsplit(".", 1)[-1]
+    text = text.upper()
+    if text in ("ISOLATED", "CROSS"):
+        return text
+    return None
+
+
 def _side_label(raw: object) -> str:
     """``LONG`` out of ``LONG``, ``PositionSide.LONG`` or ``TradeType.BUY``."""
     text = str(raw or "").strip()
@@ -55,32 +87,26 @@ def _side_key(side: str) -> str:
     return text
 
 
-def merge_venue_positions(tracked: list[dict], venue: list[dict]) -> list[dict]:
-    """Venue rows the trade page should show on top of executor-tracked ones.
+def _position_key(row: dict) -> tuple[str, str, str]:
+    return (
+        str(row.get("connector_name") or ""),
+        _market_pair(row.get("trading_pair")).upper(),
+        _side_key(str(row.get("position_side") or "")),
+    )
 
-    ``/trading/positions`` is the exchange's own book. A MEXC position opened
-    outside an executor never appears in ``get_positions_summary``, so the
-    bottom pane used to say the account was flat. A row the summary already
-    carries for the same connector, pair and side is left out, so one position
-    is not drawn twice. A zero amount is flat and is left out too.
+
+def merge_venue_positions(tracked: list[dict], venue: list[dict]) -> list[dict]:
+    """Exchange rows for the trade page.
+
+    The exchange amount is always returned. A tracked row with the same
+    connector, pair and side used to hide it, including when the tracked
+    amount was a different size. The page shows both when the amounts
+    disagree and keeps the exchange row when they match. A zero amount is
+    flat and is left out.
     """
-    held = set()
-    for row in tracked:
-        # A flat executor row (amount 0) is not the position. Treating it as
-        # held hid the exchange's own long, which is the row the trade page
-        # was missing. A row with no amount is still a key: the summary named
-        # that side, so the venue copy would be a second drawing of it.
-        amount = row.get("amount")
-        if amount is not None and amount != "" and _first_number(amount) == 0:
-            continue
-        held.add(
-            (
-                str(row.get("connector_name") or ""),
-                _market_pair(row.get("trading_pair")).upper(),
-                _side_key(str(row.get("position_side") or "")),
-            )
-        )
+    del tracked  # The page decides whether a tracked twin is a duplicate.
     extra: list[dict] = []
+    seen: set[tuple[str, str, str]] = set()
     for raw in venue:
         if not isinstance(raw, dict):
             continue
@@ -88,24 +114,44 @@ def merge_venue_positions(tracked: list[dict], venue: list[dict]) -> list[dict]:
         if amount == 0:
             continue
         row = _normalize_position(raw, "venue", "Exchange")
-        key = (
-            row["connector_name"],
-            _market_pair(row["trading_pair"]).upper(),
-            _side_key(str(row["position_side"])),
-        )
-        if key in held:
+        key = _position_key(row)
+        if key in seen:
             continue
-        held.add(key)
+        seen.add(key)
         extra.append(row)
     return extra
+
+
+def rows_for_pane(tracked: list[dict], venue_rows: list[dict]) -> list[dict]:
+    """Exchange row always. A tracked twin only when its amount differs."""
+    venue_by_key = {_position_key(row): row for row in venue_rows}
+    kept: list[dict] = []
+    used: set[tuple[str, str, str]] = set()
+    for row in tracked:
+        key = _position_key(row)
+        venue = venue_by_key.get(key)
+        if venue is None:
+            kept.append(row)
+            continue
+        if key not in used:
+            kept.append(venue)
+            used.add(key)
+        if _first_number(row.get("amount")) != _first_number(venue.get("amount")):
+            kept.append(row)
+    for key, venue in venue_by_key.items():
+        if key not in used:
+            kept.append(venue)
+    return kept
 
 
 def _normalize_position(pos: dict, source: str, source_name: str) -> dict:
     """Normalize a position dict to a common shape with source info."""
     amount = _first_number(pos.get("net_amount_base"), pos.get("amount"))
     entry_price = _first_number(pos.get("buy_breakeven_price"), pos.get("entry_price"))
+    mark = _optional_number(pos.get("current_price"))
+    price_for_notional = mark if mark is not None and mark > 0 else entry_price
     try:
-        notional_value = abs(float(amount)) * float(entry_price)
+        notional_value = abs(float(amount)) * float(price_for_notional)
     except (ValueError, TypeError):
         notional_value = 0
     # Which executors this row aggregates. The only attribution the API gives a
@@ -123,11 +169,21 @@ def _normalize_position(pos: dict, source: str, source_name: str) -> dict:
         "amount": amount,
         "entry_price": entry_price,
         "notional_value": notional_value,
-        "current_price": pos.get("current_price") or 0,
+        "current_price": mark if mark is not None else 0,
         "unrealized_pnl": _first_number(
             pos.get("unrealized_pnl_quote"), pos.get("unrealized_pnl")
         ),
-        "leverage": _first_number(pos.get("leverage"), default=1.0),
+        # Missing leverage stays null. 1 is a real 1x, not a stand-in.
+        "leverage": _optional_number(pos.get("leverage")),
+        "margin_mode": _margin_label(
+            pos.get("margin_mode")
+            if pos.get("margin_mode") not in (None, "")
+            else (
+                pos.get("open_type")
+                if pos.get("open_type") not in (None, "")
+                else pos.get("openType")
+            )
+        ),
         "controller_id": pos.get("controller_id") or "",
         "realized_pnl": pos.get("realized_pnl_quote") or 0,
         "cum_fees": pos.get("cum_fees_quote") or 0,
@@ -136,6 +192,39 @@ def _normalize_position(pos: dict, source: str, source_name: str) -> dict:
         "source": source,
         "source_name": source_name,
     }
+
+
+@router.get("/servers/{name}/trading/position-mode")
+async def get_position_mode(
+    name: str,
+    connector: str = "",
+    user: WebUser = Depends(require_server_access),
+):
+    """ONEWAY or HEDGE, as the connector reports it."""
+    del user
+    cm = get_config_manager()
+    client = await cm.get_client(name)
+    trading = getattr(client, "trading", None)
+    method = getattr(trading, "get_position_mode", None)
+    if method is None:
+        raise HTTPException(
+            status_code=404, detail="This API does not report position mode."
+        )
+    try:
+        result = await method("master_account", connector)
+    except Exception as exc:
+        logger.warning("position mode read failed for %s: %s", connector, exc)
+        raise HTTPException(
+            status_code=502, detail="Cannot read the account position mode."
+        ) from exc
+    mode = ""
+    if isinstance(result, dict):
+        mode = str(result.get("position_mode") or result.get("mode") or "")
+    elif isinstance(result, str):
+        mode = result
+    if "." in mode:
+        mode = mode.rsplit(".", 1)[-1]
+    return {"position_mode": mode.upper()}
 
 
 @router.get("/servers/{name}/positions")

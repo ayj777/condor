@@ -942,7 +942,8 @@ export interface ConsolidatedPosition {
   executor_count: number;
   /** The executors this row aggregates — how a hold is traced back to a pool. */
   executor_ids?: string[];
-  leverage: number;
+  leverage: number | null;
+  margin_mode?: string | null;
   controller_id: string;
   source: "executor" | "bot" | "venue";
   source_name: string;
@@ -1186,6 +1187,8 @@ export interface ActiveOrder {
   amount: number;
   price: number;
   status: string;
+  /** The account the row was fetched from. Cancel sends this, not a default. */
+  account_name?: string | null;
 }
 
 export interface TradingRulesResponse {
@@ -3549,10 +3552,35 @@ export const api = {
       `/api/v1/servers/${encodeURIComponent(server)}/orders/active?connector=${encodeURIComponent(connector)}&trading_pair=${encodeURIComponent(tradingPair)}`,
     ),
 
-  cancelOrder: (server: string, connector: string, orderId: string) =>
+  cancelOrder: (server: string, connector: string, orderId: string, account?: string | null) =>
     apiFetch<{ status: string }>(
-      `/api/v1/servers/${encodeURIComponent(server)}/orders/${encodeURIComponent(orderId)}/cancel?connector=${encodeURIComponent(connector)}`,
+      `/api/v1/servers/${encodeURIComponent(server)}/orders/${encodeURIComponent(orderId)}/cancel?connector=${encodeURIComponent(connector)}${account ? `&account=${encodeURIComponent(account)}` : ""}`,
       { method: "POST" },
+    ),
+
+  getPositionMode: (server: string, connector: string) =>
+    apiFetch<{ position_mode: string }>(
+      `/api/v1/servers/${encodeURIComponent(server)}/trading/position-mode?connector=${encodeURIComponent(connector)}`,
+    ),
+
+  setAccountLeverage: (
+    server: string,
+    body: {
+      leverage: number;
+      connector_name: string;
+      trading_pair: string;
+      side?: number;
+      account_name?: string;
+    },
+  ) =>
+    apiFetch<{ status: string }>(
+      `/api/v1/servers/${encodeURIComponent(server)}/account/leverage`,
+      { method: "POST", body: JSON.stringify(body) },
+    ),
+
+  resumeSupported: (server: string) =>
+    apiFetch<{ supported: boolean }>(
+      `/api/v1/servers/${encodeURIComponent(server)}/executors/resume-supported`,
     ),
 
   getPositionsHeld: (server: string) =>

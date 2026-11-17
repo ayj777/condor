@@ -1,16 +1,14 @@
-"""Apply leverage and margin mode before an executor is created.
+"""Account leverage and margin before an executor is created.
 
-``OrderExecutorConfig`` records leverage for the balance check and does not
-send it on the order. MEXC reads leverage from the account and reads margin
-mode from ``openType`` on each order, which the connector takes from the mode
-it was last told. Range iceberg calls ``confirm_leverage_and_margin`` itself.
-A limit or market order does not, so Condor sets them here for venues whose
-profile says the account has to be confirmed first.
+A MEXC order does not carry leverage or margin mode by itself. The account
+already has both, and the open position uses them. Range iceberg then calls
+``confirm_leverage_and_margin`` with whatever this config still contains, so a
+default of 1x or ISOLATED left in the config is a change to that position.
 
-The stock Hummingbot API exposes ``set_leverage`` and does not expose a
-margin-mode route. A missing route is not a failed order: the executor config
-still carries the mode, and range iceberg applies it. A leverage rejection is
-a failed order, because the form's leverage would otherwise be a lie.
+Create never calls ``set_leverage``. That call is ``confirm_leverage``, and
+only after the user applies a value that is at least 1 and differs from the
+open position. Margin mode is sent only when the user edited it and the new
+value differs. If the open book cannot be read, the create is aborted.
 """
 
 from __future__ import annotations
@@ -24,15 +22,21 @@ from condor.venue_capabilities import trading_profile
 logger = logging.getLogger(__name__)
 
 
+class AccountSettingsError(Exception):
+    """The create or the leverage change must not be sent."""
+
+
 async def apply_venue_account_settings(
     client: Any, account: str, config: dict
 ) -> Optional[bool]:
-    """Set leverage, then margin mode, for a venue that requires it.
+    """Prepare leverage and margin for a venue that confirms them on the account.
 
-    Returns ``None`` when this venue does not confirm account settings (the
-    caller leaves the flag off the response). ``True`` when every requested
-    setting was applied. ``False`` when a margin mode was requested and this
-    API has no margin-mode route. A leverage error propagates.
+    Returns ``None`` when this venue does not confirm account settings.
+    ``True`` when nothing still needs a margin write, or the write landed.
+    ``False`` when the user asked for a margin change and this API has no
+    margin-mode route. The field is removed in that case so range iceberg
+    cannot apply it either. A leverage below 1, or a book that cannot be
+    read, raises :class:`AccountSettingsError` and the caller does not create.
     """
     connector = str(config.get("connector_name") or "")
     profile = trading_profile(connector)
@@ -41,36 +45,123 @@ async def apply_venue_account_settings(
 
     trading = getattr(client, "trading", None)
     if trading is None:
-        return None
+        raise AccountSettingsError(
+            "Cannot read open positions, so the order was not sent."
+        )
 
     pair = str(config.get("trading_pair") or "")
-    leverage = config.get("leverage")
-    # The form's untouched default is 1x (10x on a position executor). An open
-    # MEXC position is already levered, and calling set_leverage to the default
-    # is what moves that position. ``leverage_explicit`` is set only when the
-    # user edits the field. Matching the open leverage also skips the call:
-    # setting 2x on a 2x position is the change the order was not supposed to make.
-    explicit = bool(config.get("leverage_explicit"))
-    if leverage is not None and pair and profile.leverage:
-        requested = int(float(leverage))
-        known, current = await _open_position_leverage(
-            trading, account, connector, pair
-        )
-        if known and current is not None and (not explicit or current == requested):
-            config["leverage"] = current
-        elif not known:
-            logger.warning(
-                "Could not read open positions for %s %s; leaving leverage unchanged",
-                connector,
-                pair,
-            )
-        else:
-            await trading.set_leverage(account, connector, pair, requested)
+    _reject_bad_leverage(config.get("leverage"))
+    rows = await _open_rows(client, connector)
+    matched = _match_row(rows, pair, config.get("side"))
 
-    mode = config.get("margin_mode")
-    if not mode or not profile.margin_modes:
+    if matched is not None:
+        current = _optional_float(matched.get("leverage"))
+        if current is not None and current >= 1:
+            # The executor confirms this number. It has to be the position's,
+            # not the form default, or the confirm moves the position.
+            config["leverage"] = int(current)
+
+    if not profile.margin_modes:
+        config.pop("margin_mode", None)
         return True
-    return await _set_margin_mode(trading, account, connector, pair, str(mode))
+
+    return await _apply_margin(trading, account, connector, pair, config, matched)
+
+
+async def confirm_leverage(
+    client: Any,
+    account: str,
+    connector: str,
+    pair: str,
+    leverage: int,
+    side: object = None,
+) -> None:
+    """Set leverage only when the user confirmed a value that differs.
+
+    This is not part of placing an order. A value below 1 is rejected before
+    any account call. The same value the position already has is not sent.
+    """
+    if leverage < 1:
+        raise AccountSettingsError("Leverage must be at least 1.")
+    profile = trading_profile(connector)
+    if profile is None or not profile.confirms_account_settings or not profile.leverage:
+        raise AccountSettingsError(f"{connector} does not confirm leverage here.")
+    trading = getattr(client, "trading", None)
+    if trading is None or not hasattr(trading, "set_leverage"):
+        raise AccountSettingsError("This API cannot set leverage.")
+    rows = await _open_rows(client, connector)
+    matched = _match_row(rows, pair, side)
+    current = _optional_float(matched.get("leverage")) if matched else None
+    if current is not None and int(current) == int(leverage):
+        return
+    await trading.set_leverage(account, connector, pair, int(leverage))
+
+
+def strip_order_only_fields(executor_type: str, config: dict) -> None:
+    """Drop flags the executor config model does not declare.
+
+    ``margin_mode`` stays only on a range iceberg, and only when the account
+    write above kept it. Every other executor rejects the extra key.
+    """
+    config.pop("leverage_explicit", None)
+    config.pop("leverage_confirmed", None)
+    config.pop("margin_explicit", None)
+    if executor_type == "range_iceberg_executor" and config.get("margin_mode"):
+        return
+    config.pop("margin_mode", None)
+
+
+def _reject_bad_leverage(value: object) -> None:
+    if value is None or value == "":
+        return
+    number = _optional_float(value)
+    if number is None or number < 1:
+        raise AccountSettingsError("Leverage must be at least 1.")
+
+
+async def _apply_margin(
+    trading: Any,
+    account: str,
+    connector: str,
+    pair: str,
+    config: dict,
+    matched: Optional[dict],
+) -> bool:
+    explicit = bool(config.get("margin_explicit"))
+    requested = _margin_name(config.get("margin_mode")) if explicit else None
+    if matched is not None:
+        current = _margin_name(
+            matched.get("margin_mode")
+            if matched.get("margin_mode") not in (None, "")
+            else (
+                matched.get("marginMode")
+                if matched.get("marginMode") not in (None, "")
+                else (
+                    matched.get("open_type")
+                    if matched.get("open_type") not in (None, "")
+                    else matched.get("openType")
+                )
+            )
+        )
+        if current is None:
+            raise AccountSettingsError(
+                "Cannot read the margin mode on the open "
+                f"{pair or connector} position, so the order was not sent."
+            )
+        if not explicit or requested is None or requested == current:
+            config.pop("margin_mode", None)
+            return True
+    elif not explicit or requested is None:
+        config.pop("margin_mode", None)
+        return True
+
+    applied = await _set_margin_mode(trading, account, connector, pair, requested or "")
+    if not applied:
+        # A 404 must not leave the mode in the config for range iceberg to apply.
+        config.pop("margin_mode", None)
+        return False
+    config["margin_mode"] = requested
+    return True
 
 
 async def _set_margin_mode(
@@ -89,7 +180,7 @@ async def _set_margin_mode(
         status, _message = describe_executor_error(exc)
         if status == 404:
             logger.info(
-                "margin-mode route is not on this API; %s keeps the connector's current mode",
+                "margin-mode route is not on this API; %s keeps its current mode",
                 connector,
             )
             return False
@@ -97,32 +188,82 @@ async def _set_margin_mode(
     return True
 
 
-def strip_order_only_fields(executor_type: str, config: dict) -> None:
-    """Drop fields the order executor's config model does not declare.
+async def _open_rows(client: Any, connector: str) -> list[dict]:
+    """Every open position on this connector, walking the cursor.
 
-    Range iceberg's config declares ``margin_mode``. The order, position, grid
-    and DCA configs do not, and a strict model rejects the extra key. The
-    value has already been read by :func:`apply_venue_account_settings`.
-    ``leverage_explicit`` is Condor's own flag on every executor type.
+    A missing method and a failed read are the same failure: the book is
+    unknown, and a create that guessed would be free to change it.
     """
-    config.pop("leverage_explicit", None)
-    if executor_type == "range_iceberg_executor":
-        return
-    config.pop("margin_mode", None)
+    trading = getattr(client, "trading", None)
+    if trading is None or not hasattr(trading, "get_positions"):
+        raise AccountSettingsError(
+            "Cannot read open positions, so the order was not sent."
+        )
+    try:
+        from condor.fetchers.positions import fetch_positions
+
+        rows = await fetch_positions(client, connector_name=connector, strict=True)
+    except AccountSettingsError:
+        raise
+    except Exception as exc:
+        logger.warning("Could not read positions for %s: %s", connector, exc)
+        raise AccountSettingsError(
+            "Cannot read open positions, so the order was not sent."
+        ) from exc
+    return [row for row in rows if isinstance(row, dict)]
 
 
-def _position_rows(result: Any) -> list:
-    if isinstance(result, list):
-        return result
-    if isinstance(result, dict):
-        for key in ("data", "positions"):
-            rows = result.get(key)
-            if isinstance(rows, list):
-                return rows
-    return []
+def _match_row(rows: list[dict], pair: str, side: object) -> Optional[dict]:
+    """The open row this order would change.
+
+    Hedge mode can hold both sides, so the form's side wins when both are
+    open. One row on the pair is that pair's position even when the form
+    side is the reducing side.
+    """
+    want = _pair(pair)
+    on_pair = []
+    for row in rows:
+        row_pair = _pair(row.get("trading_pair") or row.get("symbol"))
+        if want and row_pair != want:
+            continue
+        amount = _optional_float(row.get("amount"))
+        if amount is None:
+            amount = _optional_float(row.get("net_amount_base"))
+        if not amount:
+            continue
+        on_pair.append(row)
+    if not on_pair:
+        return None
+    want_side = _side_key(side)
+    sided = [
+        row
+        for row in on_pair
+        if _side_key(row.get("position_side") or row.get("side")) == want_side
+    ]
+    if sided:
+        return sided[0]
+    if len(on_pair) == 1:
+        return on_pair[0]
+    return None
 
 
-def _as_float(value: object) -> Optional[float]:
+def _pair(raw: object) -> str:
+    return str(raw or "").strip().replace("_", "-").upper()
+
+
+def _side_key(raw: object) -> str:
+    text = str(raw or "").strip()
+    if "." in text:
+        text = text.rsplit(".", 1)[-1]
+    text = text.upper()
+    if text in ("LONG", "BUY", "1"):
+        return "LONG"
+    if text in ("SHORT", "SELL", "2"):
+        return "SHORT"
+    return text
+
+
+def _optional_float(value: object) -> Optional[float]:
     if value is None or value == "":
         return None
     try:
@@ -131,43 +272,25 @@ def _as_float(value: object) -> Optional[float]:
         return None
 
 
-async def _open_position_leverage(
-    trading: Any, account: str, connector: str, pair: str
-) -> tuple[bool, Optional[int]]:
-    """``(could_read, leverage)`` for a non-zero position on this pair.
-
-    A client with no ``get_positions`` is treated as "no open position", which
-    is what the older fakes are. A call that raises is "could not read": the
-    caller then leaves the account's leverage alone rather than guessing.
-    """
-    method = getattr(trading, "get_positions", None)
-    if method is None:
-        return True, None
-    try:
-        result = await method(
-            account_names=[account] if account else None,
-            connector_names=[connector],
-            limit=200,
-        )
-    except Exception as exc:
-        logger.warning("Could not read positions for %s: %s", connector, exc)
-        return False, None
-
-    want = pair.replace("_", "-").upper()
-    for row in _position_rows(result):
-        if not isinstance(row, dict):
-            continue
-        row_pair = str(row.get("trading_pair") or row.get("symbol") or "")
-        row_pair = row_pair.replace("_", "-").upper()
-        if row_pair != want:
-            continue
-        amount = _as_float(row.get("amount"))
-        if amount is None:
-            amount = _as_float(row.get("net_amount_base"))
-        if not amount:
-            continue
-        leverage = _as_float(row.get("leverage"))
-        if leverage is None or leverage < 1:
-            continue
-        return True, int(leverage)
-    return True, None
+def _margin_name(value: object) -> Optional[str]:
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)) or (
+        isinstance(value, str) and value.strip().isdigit()
+    ):
+        number = int(float(value))
+        # MEXC openType: 1 isolated, 2 cross.
+        if number == 1:
+            return "ISOLATED"
+        if number == 2:
+            return "CROSS"
+        return None
+    text = str(value).strip()
+    if "." in text:
+        text = text.rsplit(".", 1)[-1]
+    text = text.upper()
+    if text in ("ISOLATED", "CROSS"):
+        return text
+    return None

@@ -37,3 +37,25 @@ export function executorRunDetail(ex: ExecutorInfo): {
   const paused = info.paused === true || halted;
   return { filled: filledText, halt, canResume: paused && isExecutorActive(ex.status) };
 }
+
+/** Resting child order ids, shown next to a halt. */
+export function childOrderIds(ex: { custom_info?: Record<string, unknown> } | null | undefined): string[] {
+  const info = ex?.custom_info || {};
+  const ids: string[] = [];
+  const levels = info.levels;
+  if (Array.isArray(levels)) {
+    for (const level of levels) {
+      if (!level || typeof level !== "object") continue;
+      const row = level as Record<string, unknown>;
+      const id = row.order_id || row.client_order_id;
+      if (id) ids.push(String(id));
+    }
+  }
+  const extra = info.child_order_ids;
+  if (Array.isArray(extra)) {
+    for (const id of extra) {
+      if (id) ids.push(String(id));
+    }
+  }
+  return ids;
+}

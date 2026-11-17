@@ -64,6 +64,25 @@ from condor.web.routes._errors import upstream_error
 
 router = APIRouter(tags=["market"])
 
+# Hummingbot OrderType: MARKET = 1, LIMIT = 2, LIMIT_MAKER = 3.
+_ORDER_TYPE_NUMBERS = {1: "MARKET", 2: "LIMIT", 3: "LIMIT_MAKER"}
+
+
+def canonical_order_type(item: object) -> str:
+    """``LIMIT`` from ``LIMIT``, ``OrderType.LIMIT``, or ``2``."""
+    if item is None or item is False or item == "":
+        return ""
+    if isinstance(item, bool):
+        return ""
+    if isinstance(item, (int, float)):
+        return _ORDER_TYPE_NUMBERS.get(int(item), "")
+    text = str(item).strip()
+    if text.isdigit():
+        return _ORDER_TYPE_NUMBERS.get(int(text), "")
+    if "." in text:
+        text = text.rsplit(".", 1)[-1]
+    return text.upper()
+
 
 # A token or pool address: an EVM 0x-address or a base58 Solana pubkey. Guards the
 # values that reach GeckoTerminal as URL path segments, and tells a real address
@@ -312,11 +331,12 @@ async def get_trading_rules(
     for pair, rule_data in result.items():
         if isinstance(rule_data, dict):
             raw_types = rule_data.get("supported_order_types") or []
-            order_types = (
-                [str(item).upper() for item in raw_types if item]
-                if isinstance(raw_types, list)
-                else []
-            )
+            order_types = []
+            if isinstance(raw_types, list):
+                for item in raw_types:
+                    named = canonical_order_type(item)
+                    if named and named not in order_types:
+                        order_types.append(named)
             rules.append(
                 TradingRuleItem(
                     trading_pair=pair,

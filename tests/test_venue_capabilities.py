@@ -3,6 +3,7 @@
 from condor.agents.shutdown import _is_perp
 from condor.venue_capabilities import (
     is_perpetual_connector,
+    perpetual_for_closeout,
     trading_profile,
 )
 
@@ -38,6 +39,15 @@ def test_an_unlisted_perpetual_still_counts_and_spot_does_not():
     assert is_perpetual_connector("kucoin_perpetual") is True
     assert is_perpetual_connector("binance") is False
     assert is_perpetual_connector("") is False
+
+
+def test_closeout_keeps_the_old_perpetual_substring():
+    assert perpetual_for_closeout("mexc_perpetual") is True
+    assert perpetual_for_closeout("kucoin_perpetual") is True
+    assert perpetual_for_closeout("foo_perp") is False
+    assert perpetual_for_closeout("Kucoin_Perpetual") is False
+    assert is_perpetual_connector("foo_perp") is True
+    assert is_perpetual_connector("kucoin_perpetual") is True
 
 
 def test_shutdown_treats_mexc_as_a_perp_and_an_empty_name_as_unknown():

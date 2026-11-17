@@ -15,7 +15,9 @@ import {
 import type { ExecutorValidation } from "./types";
 import { usesLimitPrice, type OrderAction, type OrderState } from "./order-config";
 import { RangeIcebergFields } from "./RangeIcebergFields";
-import { floorBaseAmount, legalBaseAmount, type SizeRule } from "@/lib/order-size";
+import { floorBaseAmount, legalBaseAmount, percentBase, type SizeRule } from "@/lib/order-size";
+import { fallbackStrategy } from "@/lib/order-strategy";
+import { positionModeLabel, sideOptions, type OpenBook } from "@/lib/trade-guards";
 
 // ── Execution strategy options ──
 
@@ -55,6 +57,15 @@ interface Props {
   lockStrategy?: boolean;
   /** Leverage of an open position on this pair, so the form can say it is matching it. */
   positionLeverage?: number | null;
+  /** Account position mode, ONEWAY or HEDGE. Empty until the read returns. */
+  positionMode?: string;
+  /** The open book, used to label a one-way sell and to show the size after this order. */
+  openBook?: OpenBook | null;
+  /** Sets leverage on its own. Create does not call this. */
+  onApplyLeverage?: () => void;
+  applyingLeverage?: boolean;
+  /** True for the frame after a forced strategy change, so Create stays disabled. */
+  onStrategyHold?: (held: boolean) => void;
   /** Wallet balance behind the percentage presets; `null` when it is unknown. */
   baseAvailable?: number | null;
   quoteAvailable?: number | null;
@@ -79,6 +90,11 @@ export function OrderConfigPanel({
   connector = "",
   lockStrategy = false,
   positionLeverage = null,
+  positionMode = "",
+  openBook = null,
+  onApplyLeverage,
+  applyingLeverage = false,
+  onStrategyHold,
   baseAvailable = null,
   quoteAvailable = null,
   baseSymbol,
@@ -90,9 +106,10 @@ export function OrderConfigPanel({
     ? STRATEGY_OPTIONS.filter((o) => strategies.includes(o.value))
     : STRATEGY_OPTIONS;
 
-  // A strategy carried over from another venue (LIMIT on binance → solana) has to
-  // fall back, or the panel would submit a strategy the venue cannot honor.
+  // A strategy the pair does not list falls back to LIMIT, never to MARKET.
+  // A resting order is not rewritten into a market order.
   const allowed = options.some((o) => o.value === state.execution_strategy);
+  const allowedNames = options.map((o) => o.value).join("|");
   useEffect(() => {
     if (lockStrategy) {
       if (state.execution_strategy !== "RANGE_ICEBERG") {
@@ -100,10 +117,15 @@ export function OrderConfigPanel({
       }
       return;
     }
-    if (!allowed) {
-      dispatch({ type: "SET_FIELD", field: "execution_strategy", value: "MARKET" });
-    }
-  }, [allowed, lockStrategy, state.execution_strategy, dispatch]);
+    if (allowed) return;
+    const next = fallbackStrategy(
+      state.execution_strategy,
+      allowedNames ? allowedNames.split("|") : [],
+    );
+    if (!next || next === state.execution_strategy) return;
+    onStrategyHold?.(true);
+    dispatch({ type: "SET_FIELD", field: "execution_strategy", value: next });
+  }, [allowed, allowedNames, lockStrategy, state.execution_strategy, dispatch, onStrategyHold]);
 
   // Anchor the order price on this market once, so a limit order opens with its
   // line already on the chart and ready to be dragged rather than at 0.
@@ -130,10 +152,13 @@ export function OrderConfigPanel({
   const pickPercent = (pct: number) => {
     if (spendable === null || spendable <= 0) return;
     const spend = spendable * pct;
-    const raw = spendsBase
-      ? spend
-      : (spend * (isSpot ? 1 : state.leverage)) / (sizingPrice as number);
-    const stepped = sizeRule ? floorBaseAmount(raw, sizeRule.increment) : raw;
+    const usedLeverage =
+      !isSpot && positionLeverage != null && positionLeverage >= 1
+        ? positionLeverage
+        : state.leverage;
+    const stepped = spendsBase
+      ? (sizeRule ? floorBaseAmount(spend, sizeRule.increment) : spend)
+      : percentBase(spendable, pct, sizingPrice as number, isSpot ? 1 : usedLeverage, sizeRule?.increment ?? 0);
     dispatch({ type: "SET_FIELD", field: "amount", value: Number(stepped.toPrecision(8)) });
   };
   const snapped = sizeRule ? legalBaseAmount(state.amount, sizeRule) : state.amount;
@@ -147,7 +172,18 @@ export function OrderConfigPanel({
     <div className="flex flex-col gap-4 overflow-y-auto p-3">
       {/* Direction — Buy/Sell on spot: Long/Short would suggest a perp, and a
           "short" without tokens to sell is not a thing a swap can do. */}
-      <SideSelector side={state.side} dispatch={dispatch} isSpot={isSpot} />
+      {positionModeLabel(positionMode) && (
+        <p className="text-[10px] text-[var(--color-text-muted)]">
+          Position mode: {positionModeLabel(positionMode)}
+        </p>
+      )}
+      <SideSelector
+        side={state.side}
+        dispatch={dispatch}
+        isSpot={isSpot}
+        longLabel={sideOptions(positionMode, openBook)[0]?.label}
+        shortLabel={sideOptions(positionMode, openBook)[1]?.label}
+      />
 
       {/* Order Config */}
       <div className="space-y-2.5">
@@ -169,6 +205,11 @@ export function OrderConfigPanel({
               {state.amount > 0 && snapped !== state.amount && snapped >= sizeRule.minOrderSize
                 ? ` This order sends ${snapped}.`
                 : ""}
+            </p>
+          )}
+          {openBook && openBook.amount > 0 && snapped > 0 && (
+            <p className="mt-1 text-[10px] text-[var(--color-text-muted)]">
+              After this order the position is {Number((openBook.amount + snapped).toPrecision(8))} {displayBase}.
             </p>
           )}
           {belowMin && (
@@ -206,10 +247,22 @@ export function OrderConfigPanel({
         />
         )}
         <LeverageField value={state.leverage} field="leverage" dispatch={dispatch} isSpot={isSpot} />
-        {!isSpot && positionLeverage != null && positionLeverage >= 1 && (
-          <p className="-mt-1 text-[10px] text-[var(--color-text-muted)]">
-            Open position is {positionLeverage}x. Leave leverage here to keep it.
-          </p>
+        {!isSpot && (
+          <div className="flex items-center justify-between gap-2">
+            <p className="text-[10px] text-[var(--color-text-muted)]">
+              {positionLeverage != null && positionLeverage >= 1
+                ? `Orders keep the open ${positionLeverage}x. Apply leverage to change it.`
+                : "Apply leverage to set it. Placing an order does not."}
+            </p>
+            <button
+              type="button"
+              onClick={() => onApplyLeverage?.()}
+              disabled={!onApplyLeverage || applyingLeverage || !(state.leverage >= 1)}
+              className="shrink-0 rounded border border-[var(--color-border)] px-2 py-1 text-[10px] text-[var(--color-text)] hover:bg-[var(--color-surface-hover)] disabled:opacity-50"
+            >
+              {applyingLeverage ? "Applying" : "Apply leverage"}
+            </button>
+          </div>
         )}
         {!isSpot && marginModes.length > 0 && (
           <SelectField

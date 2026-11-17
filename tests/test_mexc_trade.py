@@ -92,7 +92,40 @@ def test_a_live_mexc_position_is_added_and_a_tracked_one_is_not_doubled():
             "position_side": "BUY",
         }
     ]
-    assert merge_venue_positions(tracked, venue) == []
+    # The exchange row is always kept. A tracked twin is shown only when the
+    # amounts disagree, and the exchange row is the one named as such.
+    from condor.web.routes.positions import rows_for_pane
+
+    assert merge_venue_positions(tracked, venue) == added
+    same = rows_for_pane(
+        [
+            {
+                "connector_name": "mexc_perpetual",
+                "trading_pair": "AIOT-USDT",
+                "position_side": "LONG",
+                "amount": 30,
+                "source": "executor",
+            }
+        ],
+        added,
+    )
+    assert len(same) == 1
+    assert same[0]["source"] == "venue"
+    both = rows_for_pane(
+        [
+            {
+                "connector_name": "mexc_perpetual",
+                "trading_pair": "AIOT-USDT",
+                "position_side": "LONG",
+                "amount": 10,
+                "source": "executor",
+            }
+        ],
+        added,
+    )
+    assert [row["source"] for row in both] == ["venue", "executor"]
+    assert both[0]["amount"] == 30
+    assert both[1]["amount"] == 10
 
 
 def test_a_flat_venue_row_is_dropped():
@@ -166,42 +199,97 @@ class _Trading:
         return {"ok": True}
 
 
-def test_mexc_sets_leverage_and_survives_a_missing_margin_route():
+def test_a_missing_position_read_aborts_and_a_default_margin_is_not_sent():
     trading = _Trading(margin_status=404)
     client = FakeClient()
     client.trading = trading
-    applied = asyncio.run(
-        apply_venue_account_settings(
-            client,
-            "master_account",
-            {
-                "connector_name": "mexc_perpetual",
-                "trading_pair": "AIOT-USDT",
-                "leverage": 2,
-                "margin_mode": "ISOLATED",
-            },
+    with pytest.raises(Exception) as missing:
+        asyncio.run(
+            apply_venue_account_settings(
+                client,
+                "master_account",
+                {
+                    "connector_name": "mexc_perpetual",
+                    "trading_pair": "AIOT-USDT",
+                    "leverage": 2,
+                    "margin_mode": "ISOLATED",
+                },
+            )
         )
+    assert "Cannot read open positions" in str(missing.value)
+    assert trading.leverage_calls == []
+    assert trading.margin_calls == []
+
+    async def get_positions(**_kwargs):
+        return {"data": []}
+
+    trading.get_positions = get_positions
+    config = {
+        "connector_name": "mexc_perpetual",
+        "trading_pair": "AIOT-USDT",
+        "leverage": 2,
+        "margin_mode": "ISOLATED",
+    }
+    applied = asyncio.run(
+        apply_venue_account_settings(client, "master_account", config)
+    )
+    assert applied is True
+    assert trading.leverage_calls == []
+    assert "margin_mode" not in config
+
+    config["margin_mode"] = "CROSS"
+    config["margin_explicit"] = True
+    applied = asyncio.run(
+        apply_venue_account_settings(client, "master_account", config)
     )
     assert applied is False
-    assert trading.leverage_calls == [
-        ("master_account", "mexc_perpetual", "AIOT-USDT", 2)
-    ]
+    assert "margin_mode" not in config
     assert trading.margin_calls
+    assert trading.leverage_calls == []
 
 
 def test_an_open_2x_position_is_not_moved_to_the_form_default():
-    trading = _Trading()
+    from condor.fetchers.account_settings import (
+        AccountSettingsError,
+        confirm_leverage,
+    )
 
-    async def get_positions(**_kwargs):
+    trading = _Trading()
+    pages = {"n": 0}
+
+    async def get_positions(**kwargs):
+        pages["n"] += 1
+        if kwargs.get("cursor") != "page-2":
+            filler = {
+                "connector_name": "mexc_perpetual",
+                "trading_pair": "OTHER-USDT",
+                "side": "LONG",
+                "amount": 1,
+                "leverage": 9,
+                "open_type": 1,
+            }
+            return {
+                "data": [filler] * 200,
+                "pagination": {"next_cursor": "page-2"},
+            }
         return {
             "data": [
                 {
                     "connector_name": "mexc_perpetual",
-                    "trading_pair": "AIOT-USDT",
+                    "trading_pair": "AIOT_USDT",
+                    "side": "SHORT",
+                    "amount": 1,
+                    "leverage": 7,
+                    "open_type": 2,
+                },
+                {
+                    "connector_name": "mexc_perpetual",
+                    "trading_pair": "AIOT_USDT",
                     "side": "LONG",
                     "amount": 60770,
                     "leverage": 2.0,
-                }
+                    "open_type": 1,
+                },
             ]
         }
 
@@ -211,17 +299,40 @@ def test_an_open_2x_position_is_not_moved_to_the_form_default():
     config = {
         "connector_name": "mexc_perpetual",
         "trading_pair": "AIOT-USDT",
+        "side": 1,
         "leverage": 1,
         "margin_mode": "ISOLATED",
-        "leverage_explicit": False,
+        "leverage_explicit": True,
     }
     asyncio.run(apply_venue_account_settings(client, "master_account", config))
+    assert pages["n"] == 2
     assert trading.leverage_calls == []
     assert config["leverage"] == 2
+    assert "margin_mode" not in config
 
     config["leverage"] = 5
     config["leverage_explicit"] = True
+    config["margin_mode"] = "CROSS"
+    config["margin_explicit"] = True
     asyncio.run(apply_venue_account_settings(client, "master_account", config))
+    assert trading.leverage_calls == []
+    assert config["leverage"] == 2
+    assert config["margin_mode"] == "CROSS"
+    assert trading.margin_calls
+
+    with pytest.raises(AccountSettingsError):
+        asyncio.run(
+            confirm_leverage(
+                client, "master_account", "mexc_perpetual", "AIOT-USDT", 0, 1
+            )
+        )
+    asyncio.run(
+        confirm_leverage(client, "master_account", "mexc_perpetual", "AIOT-USDT", 2, 1)
+    )
+    assert trading.leverage_calls == []
+    asyncio.run(
+        confirm_leverage(client, "master_account", "mexc_perpetual", "AIOT-USDT", 5, 1)
+    )
     assert trading.leverage_calls == [
         ("master_account", "mexc_perpetual", "AIOT-USDT", 5)
     ]
@@ -261,8 +372,15 @@ class _CM:
 _USER = WebUser(id=1, role="admin")
 
 
-def test_creating_a_mexc_order_sets_leverage_and_strips_margin_mode(monkeypatch):
+def test_creating_a_mexc_order_does_not_set_leverage_or_send_margin(monkeypatch):
+    from fastapi import HTTPException
+
     trading = _Trading()
+
+    async def get_positions(**_kwargs):
+        return {"data": []}
+
+    trading.get_positions = get_positions
     client = FakeClient(result={"executor_id": "ex-mexc"})
     client.trading = trading
     seen = {}
@@ -279,6 +397,33 @@ def test_creating_a_mexc_order_sets_leverage_and_strips_margin_mode(monkeypatch)
     # to land on the module it imports from.
     monkeypatch.setattr("condor.fetchers.executors.create_executor", _create)
 
+    blind = _Trading()
+    blind_client = FakeClient()
+    blind_client.trading = blind
+    monkeypatch.setattr(
+        "condor.web.routes.executors.get_config_manager", lambda: _CM(blind_client)
+    )
+    with pytest.raises(HTTPException) as aborted:
+        asyncio.run(
+            create_executor_endpoint(
+                name="srv",
+                body=CreateExecutorRequest(
+                    executor_type="order_executor",
+                    config={
+                        "connector_name": "mexc_perpetual",
+                        "trading_pair": "AIOT-USDT",
+                        "leverage": 2,
+                        "amount": 20,
+                    },
+                ),
+                user=_USER,
+            )
+        )
+    assert aborted.value.status_code == 400
+
+    monkeypatch.setattr(
+        "condor.web.routes.executors.get_config_manager", lambda: _CM(client)
+    )
     result = asyncio.run(
         create_executor_endpoint(
             name="srv",
@@ -301,9 +446,26 @@ def test_creating_a_mexc_order_sets_leverage_and_strips_margin_mode(monkeypatch)
     assert result["margin_mode_applied"] is True
     assert seen["config"]["leverage"] == 2
     assert "margin_mode" not in seen["config"]
-    assert trading.leverage_calls == [
-        ("master_account", "mexc_perpetual", "AIOT-USDT", 2)
-    ]
+    assert trading.leverage_calls == []
+
+    with pytest.raises(HTTPException) as low:
+        asyncio.run(
+            create_executor_endpoint(
+                name="srv",
+                body=CreateExecutorRequest(
+                    executor_type="order_executor",
+                    config={
+                        "connector_name": "mexc_perpetual",
+                        "trading_pair": "AIOT-USDT",
+                        "leverage": 0,
+                        "amount": 20,
+                    },
+                ),
+                user=_USER,
+            )
+        )
+    assert low.value.status_code == 400
+    assert "at least 1" in low.value.detail
 
 
 def test_resume_404_is_a_501(monkeypatch):
@@ -342,3 +504,238 @@ def test_normalize_order_reads_either_spelling():
     assert row["trade_type"] == "BUY"
     assert row["amount"] == 10
     assert row["price"] == 0.08
+
+
+def test_mark_notional_and_a_missing_leverage_stay_honest():
+    added = merge_venue_positions(
+        [],
+        [
+            {
+                "connector_name": "mexc_perpetual",
+                "trading_pair": "AIOT-USDT",
+                "side": "LONG",
+                "amount": 10,
+                "entry_price": 0.08,
+                "current_price": 0.1,
+            }
+        ],
+    )
+    assert added[0]["notional_value"] == 1
+    assert added[0]["leverage"] is None
+    kept = merge_venue_positions(
+        [],
+        [
+            {
+                "connector_name": "mexc_perpetual",
+                "trading_pair": "AIOT-USDT",
+                "side": "LONG",
+                "amount": 10,
+                "entry_price": 0.08,
+                "leverage": 1,
+            }
+        ],
+    )
+    assert kept[0]["leverage"] == 1
+    assert kept[0]["notional_value"] == 0.8
+
+
+def test_an_unreadable_margin_mode_refuses_the_create():
+    from condor.fetchers.account_settings import AccountSettingsError
+
+    trading = _Trading()
+
+    async def get_positions(**_kwargs):
+        return {
+            "data": [
+                {
+                    "connector_name": "mexc_perpetual",
+                    "trading_pair": "AIOT-USDT",
+                    "side": "LONG",
+                    "amount": 60770,
+                    "leverage": 2,
+                }
+            ]
+        }
+
+    trading.get_positions = get_positions
+    client = FakeClient()
+    client.trading = trading
+    with pytest.raises(AccountSettingsError) as caught:
+        asyncio.run(
+            apply_venue_account_settings(
+                client,
+                "master_account",
+                {
+                    "connector_name": "mexc_perpetual",
+                    "trading_pair": "AIOT-USDT",
+                    "side": 1,
+                    "leverage": 2,
+                },
+            )
+        )
+    assert "margin mode" in str(caught.value)
+    assert trading.leverage_calls == []
+
+
+def test_a_failed_position_read_is_not_treated_as_flat():
+    from condor.fetchers.account_settings import AccountSettingsError
+
+    trading = _Trading()
+
+    async def get_positions(**_kwargs):
+        raise RuntimeError("timeout")
+
+    trading.get_positions = get_positions
+    client = FakeClient()
+    client.trading = trading
+    with pytest.raises(AccountSettingsError):
+        asyncio.run(
+            apply_venue_account_settings(
+                client,
+                "master_account",
+                {
+                    "connector_name": "mexc_perpetual",
+                    "trading_pair": "AIOT-USDT",
+                    "leverage": 2,
+                },
+            )
+        )
+
+
+def test_cancel_prefers_the_client_order_id_and_the_fetched_account():
+    from condor.web.routes.orders import cancel_identity
+
+    account, order_id = cancel_identity(
+        {
+            "id": "bare",
+            "order_id": "oid",
+            "exchange_order_id": "ex",
+            "client_order_id": "cid",
+            "account_name": "sub",
+        }
+    )
+    assert (account, order_id) == ("sub", "cid")
+    account, order_id = cancel_identity(
+        {"id": "bare", "exchange_order_id": "ex", "account": "desk"}
+    )
+    assert (account, order_id) == ("desk", "ex")
+    underscored = normalize_order(
+        {"client_order_id": "cid", "trading_pair": "AIOT_USDT", "account_name": "sub"}
+    )
+    assert underscored["trading_pair"] == "AIOT-USDT"
+    assert underscored["account_name"] == "sub"
+
+
+def test_order_envelopes_and_order_type_names():
+    from condor.fetchers.orders import _extract_orders
+    from condor.web.routes.market import canonical_order_type
+
+    row = {"client_order_id": "cid"}
+    assert _extract_orders([row]) == [row]
+    assert _extract_orders({"orders": [row]}) == [row]
+    assert _extract_orders({"data": [row]}) == [row]
+    assert canonical_order_type("OrderType.LIMIT") == "LIMIT"
+    assert canonical_order_type(1) == "MARKET"
+    assert canonical_order_type(2) == "LIMIT"
+    assert canonical_order_type(3) == "LIMIT_MAKER"
+
+
+def test_stop_refuses_to_sell_more_than_the_executor_filled(monkeypatch):
+    from fastapi import HTTPException
+
+    from condor.web.routes.executors import stop_executor_endpoint
+
+    stopped = []
+
+    class _Executors:
+        async def get_executor(self, executor_id):
+            return {
+                "connector_name": "mexc_perpetual",
+                "trading_pair": "AIOT-USDT",
+                "custom_info": {"filled_amount": 20},
+                "config": {},
+            }
+
+        async def stop_executor(self, executor_id, keep_position=False):
+            stopped.append((executor_id, keep_position))
+            return {"ok": True}
+
+    class _Trading:
+        async def get_positions(self, **_kwargs):
+            return {
+                "data": [
+                    {
+                        "connector_name": "mexc_perpetual",
+                        "trading_pair": "AIOT-USDT",
+                        "side": "LONG",
+                        "amount": 60770,
+                    }
+                ]
+            }
+
+    client = FakeClient()
+    client.executors = _Executors()
+    client.trading = _Trading()
+    monkeypatch.setattr(
+        "condor.web.routes.executors.get_config_manager", lambda: _CM(client)
+    )
+    with pytest.raises(HTTPException) as caught:
+        asyncio.run(
+            stop_executor_endpoint(
+                name="srv", executor_id="ex-1", keep_position=False, user=_USER
+            )
+        )
+    assert caught.value.status_code == 400
+    assert "60770" in caught.value.detail
+    assert "20" in caught.value.detail
+    assert stopped == []
+    asyncio.run(
+        stop_executor_endpoint(
+            name="srv", executor_id="ex-1", keep_position=True, user=_USER
+        )
+    )
+    assert stopped == [("ex-1", True)]
+
+
+def test_resume_refuses_an_offstep_child(monkeypatch):
+    from fastapi import HTTPException
+
+    from condor.web.routes.executors import resume_executor_endpoint
+
+    resumed = []
+
+    class _Executors:
+        def __init__(self, amount):
+            self.amount = amount
+
+        async def get_executor(self, executor_id):
+            return {
+                "connector_name": "mexc_perpetual",
+                "trading_pair": "AIOT-USDT",
+                "custom_info": {"levels": [{"amount": self.amount, "order_id": "c1"}]},
+            }
+
+        async def resume_executor(self, executor_id):
+            resumed.append(executor_id)
+            return {"ok": True}
+
+    class _Connectors:
+        async def get_trading_rules(self, connector_name):
+            return {"AIOT-USDT": {"min_base_amount_increment": 10}}
+
+    client = FakeClient()
+    client.executors = _Executors(6077)
+    client.connectors = _Connectors()
+    monkeypatch.setattr(
+        "condor.web.routes.executors.get_config_manager", lambda: _CM(client)
+    )
+    with pytest.raises(HTTPException) as caught:
+        asyncio.run(
+            resume_executor_endpoint(name="srv", executor_id="ex-1", user=_USER)
+        )
+    assert caught.value.status_code == 400
+    assert resumed == []
+
+    client.executors = _Executors(6080)
+    asyncio.run(resume_executor_endpoint(name="srv", executor_id="ex-1", user=_USER))
+    assert resumed == ["ex-1"]

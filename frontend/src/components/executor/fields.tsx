@@ -530,7 +530,51 @@ export function LeverageField({
       </div>
     );
   }
-  return <NumberField label="Leverage" value={value} field={field} dispatch={dispatch} step={1} min={1} suffix="x" />;
+  return <LeverageText value={value} field={field} dispatch={dispatch} />;
+}
+
+function LeverageText({
+  value,
+  field,
+  dispatch,
+}: {
+  value: number;
+  field: string;
+  dispatch: FieldDispatch;
+}) {
+  const id = useId();
+  const [focused, setFocused] = useState(false);
+  const [draft, setDraft] = useState("");
+  const shown = focused ? draft : value > 0 ? String(value) : "";
+  return (
+    <div className="min-w-0">
+      <label htmlFor={id} className="mb-1 block truncate text-xs text-[var(--color-text-muted)]">Leverage</label>
+      <div className="flex min-w-0 items-center gap-1">
+        <input
+          id={id}
+          type="text"
+          inputMode="decimal"
+          value={shown}
+          onFocus={() => {
+            setDraft(value > 0 ? String(value) : "");
+            setFocused(true);
+          }}
+          onBlur={() => setFocused(false)}
+          onWheel={(e) => {
+            e.currentTarget.blur();
+          }}
+          onChange={(e) => {
+            setDraft(e.target.value);
+            const raw = parseFloat(e.target.value);
+            dispatch({ type: "SET_FIELD", field, value: Number.isNaN(raw) ? 0 : raw });
+          }}
+          placeholder="1"
+          className="w-full min-w-0 flex-1 rounded border border-[var(--color-border)] bg-[var(--color-bg)] px-2.5 py-1.5 font-mono text-xs text-[var(--color-text)] placeholder:text-[var(--color-text-muted)]/40 focus:border-[var(--color-primary)] focus:outline-none"
+        />
+        <span className="shrink-0 text-[10px] text-[var(--color-text-muted)]">x</span>
+      </div>
+    </div>
+  );
 }
 
 // ── Shared constants ──
@@ -541,11 +585,15 @@ export function SideSelector({
   side,
   dispatch,
   isSpot = false,
+  longLabel,
+  shortLabel,
 }: {
   side: 1 | 2;
   dispatch: FieldDispatch;
-  /** Spot has no position to be long or short of — the sides are Buy and Sell. */
+  /** Spot has no position to be long or short of. The sides are Buy and Sell. */
   isSpot?: boolean;
+  longLabel?: string;
+  shortLabel?: string;
 }) {
   return (
     <div>
@@ -562,7 +610,11 @@ export function SideSelector({
             }`}
             style={side === opt.value ? { backgroundColor: opt.color } : undefined}
           >
-            {isSpot ? (opt.value === 1 ? "BUY" : "SELL") : opt.label}
+            {isSpot
+              ? opt.value === 1 ? "BUY" : "SELL"
+              : opt.value === 1
+                ? longLabel || opt.label
+                : shortLabel || opt.label}
           </button>
         ))}
       </div>

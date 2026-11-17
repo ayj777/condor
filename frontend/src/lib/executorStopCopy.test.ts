@@ -45,7 +45,9 @@ describe("stopKeepCopy", () => {
       expect(copy.checked).toBe(
         "The executor stops but the position stays open on the exchange.",
       );
-      expect(copy.unchecked).toBe("The executor stops and closes any open position.");
+      expect(copy.unchecked).toBe(
+        "The executor stops and sells only the base this executor filled, reduce-only.",
+      );
     }
   });
 

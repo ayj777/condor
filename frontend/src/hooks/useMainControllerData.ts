@@ -9,6 +9,7 @@ import {
 import { api, type ExecutorInfo } from "@/lib/api";
 import { computeMultiOverlays } from "@/lib/executor-overlays";
 import { executorsQuery } from "@/lib/queryClient";
+import { rowsForPane } from "@/lib/trade-guards";
 
 /** The pool an executor traded in, from wherever it records one. */
 function executorPool(ex: ExecutorInfo): string {
@@ -172,11 +173,13 @@ export function useMainControllerData(
 
   const positions = useMemo(() => {
     if (!positionsData) return [];
-    const all = [
-      ...(positionsData.executor_positions ?? []),
-      ...(positionsData.bot_positions ?? []),
-      ...(positionsData.venue_positions ?? []),
-    ];
+    const all = rowsForPane(
+      [
+        ...(positionsData.executor_positions ?? []),
+        ...(positionsData.bot_positions ?? []),
+      ],
+      positionsData.venue_positions ?? [],
+    );
     // A position is named however its executor is, and an executor found by pool
     // may spell the market a third way neither `pair` nor `altPair` predicted --
     // so the spellings that actually turned up count as this market too.

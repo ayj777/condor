@@ -1,3 +1,5 @@
+import { floorBaseAmount, type SizeRule } from "./order-size";
+
 /**
  * Client-side twin of `RangeIcebergExecutorConfig`.
  *
@@ -161,11 +163,78 @@ export function validateRangeIceberg(input: RangeIcebergInput): string | null {
   return null;
 }
 
+export interface IcebergSent {
+  total: number;
+  perSlice: number;
+  sliceCount: number;
+  error: string | null;
+}
+
+/**
+ * The size the create will send.
+ *
+ * Every child is floored to the step. The total is that child times the
+ * slice count, so the preview and the payload match. Quote is converted to
+ * base with `price` before the floor. Contracts need a second confirm and
+ * are floored to whole contracts.
+ */
+export function icebergSentSize(
+  input: RangeIcebergInput,
+  rule: SizeRule | null,
+  price: number,
+  contractsConfirmed: boolean,
+): IcebergSent {
+  const raw = rangeIcebergPreview(input);
+  if (!raw) {
+    return { total: 0, perSlice: 0, sliceCount: 0, error: "Total amount is required" };
+  }
+  if (input.sizeUnit === "CONTRACTS" && !contractsConfirmed) {
+    return {
+      total: raw.total,
+      perSlice: raw.perSlice,
+      sliceCount: raw.sliceCount,
+      error: "Confirm that this size is in contracts, not base coins",
+    };
+  }
+  let baseTotal = input.totalAmount;
+  if (input.sizeUnit === "QUOTE") {
+    if (!(price > 0)) {
+      return { ...raw, error: "A price is required to convert quote size" };
+    }
+    baseTotal = input.totalAmount / price;
+  }
+  const step = input.sizeUnit === "CONTRACTS" ? 1 : rule?.increment ?? 0;
+  const min = input.sizeUnit === "CONTRACTS" ? 1 : rule?.minOrderSize ?? 0;
+  if (!(step > 0)) {
+    return { total: input.totalAmount, perSlice: raw.perSlice, sliceCount: raw.sliceCount, error: null };
+  }
+  const child = floorBaseAmount(baseTotal / raw.sliceCount, step);
+  if (!(child > 0) || (min > 0 && child < min)) {
+    return {
+      total: 0,
+      perSlice: 0,
+      sliceCount: raw.sliceCount,
+      error: `Each slice must be at least ${min} after the ${step} step`,
+    };
+  }
+  const sentBase = Number((child * raw.sliceCount).toPrecision(12));
+  if (input.sizeUnit === "QUOTE") {
+    return {
+      total: Number((sentBase * price).toPrecision(12)),
+      perSlice: Number((child * price).toPrecision(12)),
+      sliceCount: raw.sliceCount,
+      error: null,
+    };
+  }
+  return { total: sentBase, perSlice: child, sliceCount: raw.sliceCount, error: null };
+}
+
 /** The `config` body for `POST /executors/` with `executor_type: range_iceberg_executor`. */
 export function rangeIcebergConfig(
   input: RangeIcebergInput,
   connector: string,
   pair: string,
+  includeMargin = false,
 ): Record<string, unknown> {
   const config: Record<string, unknown> = {
     connector_name: connector,
@@ -185,8 +254,8 @@ export function rangeIcebergConfig(
     catch_up: input.catchUp,
     reduce_only: input.reduceOnly,
     leverage: input.leverage,
-    margin_mode: input.marginMode,
   };
+  if (includeMargin) config.margin_mode = input.marginMode;
   if (input.mode === "RANGE") {
     config.price_low = input.priceLow;
     config.price_high = input.priceHigh;

@@ -99,13 +99,12 @@ export function positionReducer(state: PositionState, action: PositionAction): P
   switch (action.type) {
     case "SET_FIELD": {
       if (action.field === "leverage") {
-        return { ...state, leverage: Number(action.value), leverageExplicit: true };
+        return { ...state, leverage: Number(action.value), leverageExplicit: false };
       }
       return { ...state, [action.field]: action.value };
     }
     case "ADOPT_LEVERAGE":
-      if (state.leverageExplicit) return state;
-      return { ...state, leverage: action.value };
+      return { ...state, leverage: action.value, leverageExplicit: false };
     case "SET_CONNECTOR":
     case "SET_PAIR":
       return { ...state, entry_price: 0, anchored: false, leverageExplicit: false };
@@ -219,7 +218,6 @@ export function usePositionConfig() {
       leverage: isSpot ? 1 : state.leverage,
       triple_barrier_config: tripleBarrier,
     };
-    if (state.leverageExplicit) config.leverage_explicit = true;
     if (state.entry_price > 0) config.entry_price = state.entry_price;
     if (state.activation_bounds > 0) config.activation_bounds = state.activation_bounds;
 

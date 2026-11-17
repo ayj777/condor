@@ -12,6 +12,8 @@ export interface SizeRule {
   minOrderSize: number;
   /** `min_base_amount_increment`. Zero means the venue stated no step. */
   increment: number;
+  /** `min_price_increment`. Zero means the venue stated no tick. */
+  priceIncrement?: number;
 }
 
 /** Nearest multiple of `increment`. An absent step returns `amount` unchanged. */
@@ -33,19 +35,43 @@ export function floorBaseAmount(amount: number, increment: number): number {
   return Number((steps * increment).toPrecision(12));
 }
 
-/** The base amount a create will submit, after the venue's step. */
+/**
+ * Base size for a percent of the quote balance.
+ *
+ * `leverage` is the leverage the order will actually use, which is the open
+ * position's leverage when one is open.
+ */
+export function percentBase(
+  spendable: number,
+  pct: number,
+  price: number,
+  leverage: number,
+  increment: number,
+): number {
+  if (!(spendable > 0) || !(pct > 0) || !(price > 0) || !(leverage >= 1)) return 0;
+  return floorBaseAmount((spendable * pct * leverage) / price, increment);
+}
+
+/** The base amount a create will submit. Floored to the step, never rounded up. */
 export function legalBaseAmount(amount: number, rule: SizeRule | null | undefined): number {
   if (!(amount > 0)) return 0;
   if (!rule || !(rule.increment > 0)) return amount;
-  return snapBaseAmount(amount, rule.increment);
+  return floorBaseAmount(amount, rule.increment);
+}
+
+/** Nearest tick. An absent increment leaves the price unchanged. */
+export function quantizePrice(price: number, increment: number): number {
+  if (!(price > 0) || !(increment > 0) || !Number.isFinite(price)) return price > 0 ? price : 0;
+  const steps = Math.round(price / increment);
+  return Number((steps * increment).toPrecision(12));
 }
 
 /**
  * Why this amount cannot be sent, or null when the snapped size is legal.
  *
- * A size that merely sits between two steps is legal: the create sends the
- * snapped multiple, and the form says so. A size that snaps below the minimum
- * is not, and the message names the minimum in the base asset.
+ * A size that floors onto a legal step is sent as that smaller size, and the
+ * form says so. A size that floors below the minimum is not. The message
+ * names the minimum in the base asset.
  */
 export function baseAmountError(
   amount: number,

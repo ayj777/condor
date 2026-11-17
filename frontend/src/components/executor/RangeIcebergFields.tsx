@@ -1,7 +1,7 @@
 import { useState } from "react";
 
-import { legalBaseAmount, type SizeRule } from "@/lib/order-size";
-import { formatInterval, rangeIcebergPreview } from "@/lib/range-iceberg";
+import type { SizeRule } from "@/lib/order-size";
+import { formatInterval, icebergSentSize, rangeIcebergPreview } from "@/lib/range-iceberg";
 import { rangeIcebergInput, type OrderAction, type OrderState } from "./order-config";
 import { NumberField, PriceField, SectionHeader, SelectField } from "./fields";
 
@@ -99,11 +99,10 @@ export function RangeIcebergFields({
     dispatch({ type: "SET_FIELD", field, value });
   const input = rangeIcebergInput(state);
   const preview = rangeIcebergPreview(input);
-  const sends =
-    state.ri_size_unit === "BASE" && sizeRule && state.ri_total_amount > 0
-      ? legalBaseAmount(state.ri_total_amount, sizeRule)
-      : state.ri_total_amount;
-  const snapped = sends !== state.ri_total_amount;
+  const price = state.ri_mode === "UP_TO"
+    ? state.ri_limit_price
+    : Math.max(state.ri_price_low, state.ri_price_high);
+  const sent = icebergSentSize(input, sizeRule, price, state.ri_contracts_confirmed);
 
   return (
     <div className="space-y-2.5">
@@ -126,8 +125,21 @@ export function RangeIcebergFields({
       {sizeRule && state.ri_size_unit === "BASE" && sizeRule.minOrderSize > 0 && (
         <p className="text-[10px] text-[var(--color-text-muted)]">
           Step {sizeRule.increment || sizeRule.minOrderSize} {baseSymbol}. Minimum {sizeRule.minOrderSize}.
-          {snapped ? ` This order sends ${sends}.` : ""}
+          {sent.error == null && sent.total !== state.ri_total_amount
+            ? ` This order sends ${sent.total}, ${sent.perSlice} per slice.`
+            : ""}
         </p>
+      )}
+      {state.ri_size_unit === "CONTRACTS" && (
+        <label className="flex cursor-pointer items-center gap-2 text-[10px] text-[var(--color-text)]">
+          <input
+            type="checkbox"
+            checked={state.ri_contracts_confirmed}
+            onChange={(e) => set("ri_contracts_confirmed", e.target.checked)}
+            className="h-3.5 w-3.5 accent-[var(--color-primary)]"
+          />
+          I mean contracts, not base coins
+        </label>
       )}
       <SelectField
         label="Size unit"
@@ -196,10 +208,11 @@ export function RangeIcebergFields({
       {preview && (
         <div className="rounded border border-[var(--color-border)] bg-[var(--color-bg)] px-2.5 py-2 text-[10px] text-[var(--color-text-muted)]">
           <p className="font-medium text-[var(--color-text)]">Preview</p>
-          <p>Total {preview.total} {state.ri_size_unit.toLowerCase()}</p>
-          <p>Per slice {Number(preview.perSlice.toPrecision(6))} across {preview.sliceCount}</p>
+          <p>Total {sent.error ? preview.total : sent.total} {state.ri_size_unit.toLowerCase()}</p>
+          <p>Per slice {Number((sent.error ? preview.perSlice : sent.perSlice).toPrecision(6))} across {preview.sliceCount}</p>
           <p>Interval {formatInterval(preview.intervalSeconds)}</p>
           <p>Max price {preview.maxPrice ?? "not set"}</p>
+          {sent.error && <p className="text-[var(--color-red)]">{sent.error}</p>}
         </div>
       )}
       <button
