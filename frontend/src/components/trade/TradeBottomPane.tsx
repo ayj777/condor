@@ -1,5 +1,4 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
-import { createPortal } from "react-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChevronUp, ChevronDown, Loader2, Play, Square, Trash2, Wallet, Clock, ArrowUpDown, ArrowUp, ArrowDown } from "lucide-react";
 
@@ -11,12 +10,12 @@ import {
   formatPct,
   formatAge,
   formatPriceSig,
-  formatUsd,
   pnlColor,
   pnlTextClass,
   isExecutorActive,
 } from "@/lib/formatters";
 import { childOrderIds, executorRunDetail, executorTypeLabel } from "@/lib/executor-run";
+import { ExecutorHoverRow } from "@/components/trade/ExecutorDetailPopup";
 import { stopKeepCopy } from "@/lib/executorStopCopy";
 import { defaultKeepPosition, executorBookSide } from "@/lib/trade-guards";
 import { executorsQuery } from "@/lib/queryClient";
@@ -88,137 +87,6 @@ function getExitPrice(ex: ExecutorInfo): number {
   return Number(ci.close_price) || ex.current_price || 0;
 }
 
-// Hover tooltip component
-function ExecutorTooltip({
-  executor,
-  anchorRect,
-}: {
-  executor: ExecutorInfo;
-  anchorRect: DOMRect;
-}) {
-  const entry = getEntryPrice(executor);
-  const exit = getExitPrice(executor);
-  const config = executor.config || {};
-
-  const active = isExecutorActive(executor.status);
-
-  // Position tooltip using viewport-fixed coords (rendered via portal)
-  const tooltipHeight = 180; // approximate max height
-  // If tooltip would go above viewport top, flip it below the row
-  const flipBelow = anchorRect.top - tooltipHeight < 0;
-  const left = Math.min(
-    Math.max(anchorRect.left + anchorRect.width / 2 - 120, 8),
-    window.innerWidth - 260,
-  );
-
-  const slPct = Number(config.stop_loss);
-  const tpPct = Number(config.take_profit);
-  const leverage = Number(config.leverage);
-  const amount = Number(config.total_amount_quote) || Number(config.amount);
-
-  return createPortal(
-    <div
-      className="fixed z-[9999] pointer-events-none"
-      style={{
-        top: flipBelow ? anchorRect.bottom + 8 : anchorRect.top - 8,
-        left,
-        transform: flipBelow ? undefined : "translateY(-100%)",
-      }}
-    >
-      <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)]/95 backdrop-blur-sm shadow-xl p-3 w-[250px] text-[11px]">
-        {/* Header */}
-        <div className="flex items-center justify-between mb-2">
-          <span className="font-mono font-semibold text-[var(--color-text)]">
-            {executor.id.slice(0, 10)}…
-          </span>
-          <span
-            className={`rounded px-1.5 py-0.5 text-[9px] font-bold ${
-              active
-                ? "bg-[var(--color-green)]/20 text-[var(--color-green)]"
-                : "bg-[var(--color-text-muted)]/20 text-[var(--color-text-muted)]"
-            }`}
-          >
-            {executor.status}
-          </span>
-        </div>
-
-        {/* Price row */}
-        {(entry > 0 || exit > 0) && (
-          <div className="flex items-center gap-2 mb-1.5 text-[var(--color-text-muted)]">
-            {entry > 0 && (
-              <span>
-                Entry: <span className="text-[var(--color-text)] font-mono">{formatPriceSig(entry)}</span>
-              </span>
-            )}
-            {entry > 0 && exit > 0 && exit !== entry && <span>→</span>}
-            {exit > 0 && exit !== entry && (
-              <span>
-                {active ? "Now" : "Close"}:{" "}
-                <span className="text-[var(--color-text)] font-mono">{formatPriceSig(exit)}</span>
-              </span>
-            )}
-          </div>
-        )}
-
-        {/* Config details */}
-        <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[10px]">
-          {amount > 0 && (
-            <div>
-              <span className="text-[var(--color-text-muted)]">Amount: </span>
-              <span className="font-mono">{formatUsd(amount)}</span>
-            </div>
-          )}
-          {Number.isFinite(leverage) && leverage >= 1 && (
-            <div>
-              <span className="text-[var(--color-text-muted)]">Leverage: </span>
-              <span className="font-mono">{leverage}x</span>
-            </div>
-          )}
-          {slPct > 0 && slPct !== -1 && (
-            <div>
-              <span className="text-[var(--color-text-muted)]">SL: </span>
-              <span className="font-mono text-[var(--color-red)]">{(slPct * 100).toFixed(2)}%</span>
-            </div>
-          )}
-          {tpPct > 0 && tpPct !== -1 && (
-            <div>
-              <span className="text-[var(--color-text-muted)]">TP: </span>
-              <span className="font-mono text-[var(--color-green)]">{(tpPct * 100).toFixed(2)}%</span>
-            </div>
-          )}
-          {executor.type === "grid" && !!config.start_price && (
-            <div className="col-span-2">
-              <span className="text-[var(--color-text-muted)]">Range: </span>
-              <span className="font-mono">
-                {formatPriceSig(Number(config.start_price as number))} – {formatPriceSig(Number(config.end_price as number))}
-              </span>
-            </div>
-          )}
-          {executor.close_type && !active && (
-            <div className="col-span-2">
-              <span className="text-[var(--color-text-muted)]">Close: </span>
-              <span>{executor.close_type.replace(/_/g, " ")}</span>
-            </div>
-          )}
-        </div>
-
-        {/* Arrow */}
-        {!flipBelow && (
-          <div className="absolute bottom-0 left-1/2 -translate-x-1/2 translate-y-full">
-            <div className="w-0 h-0 border-l-[6px] border-r-[6px] border-t-[6px] border-l-transparent border-r-transparent border-t-[var(--color-border)]" />
-          </div>
-        )}
-        {flipBelow && (
-          <div className="absolute top-0 left-1/2 -translate-x-1/2 -translate-y-full">
-            <div className="w-0 h-0 border-l-[6px] border-r-[6px] border-b-[6px] border-l-transparent border-r-transparent border-b-[var(--color-border)]" />
-          </div>
-        )}
-      </div>
-    </div>,
-    document.body,
-  );
-}
-
 function SortTh<T extends string>({
   col, current, asc, onClick, align, children,
 }: {
@@ -274,8 +142,6 @@ export function TradeBottomPane({
   const [confirmResumeId, setConfirmResumeId] = useState<string | null>(null);
   const [confirmClearPos, setConfirmClearPos] = useState<ConsolidatedPosition | null>(null);
   const [clearingPositions, setClearingPositions] = useState<Set<string>>(new Set());
-  const [hoveredExecutor, setHoveredExecutor] = useState<{ executor: ExecutorInfo; rect: DOMRect } | null>(null);
-
   useEffect(() => {
     try { localStorage.setItem(TRADE_BOTTOM_PANE_KEY, expanded ? "1" : "0"); } catch { /* ok */ }
   }, [expanded]);
@@ -405,18 +271,6 @@ export function TradeBottomPane({
     },
     [onExecutorSelect, selectedExecutorId],
   );
-
-  const handleRowMouseEnter = useCallback(
-    (ex: ExecutorInfo, e: React.MouseEvent<HTMLTableRowElement>) => {
-      const rect = e.currentTarget.getBoundingClientRect();
-      setHoveredExecutor({ executor: ex, rect });
-    },
-    [],
-  );
-
-  const handleRowMouseLeave = useCallback(() => {
-    setHoveredExecutor(null);
-  }, []);
 
   // Currency conversion for the current pair's quote asset
   const quoteCurrency = pair.split("-")[1] || "USDT";
@@ -589,8 +443,9 @@ export function TradeBottomPane({
                       const exit = getExitPrice(ex);
                       const closeLabel = ex.close_type ? ex.close_type.replace(/_/g, " ") : "";
                       return (
-                        <tr
+                        <ExecutorHoverRow
                           key={ex.id}
+                          executor={ex}
                           className={`border-b border-[var(--color-border)]/30 transition-colors ${
                             isSelected
                               ? "bg-[var(--color-primary)]/10 hover:bg-[var(--color-primary)]/15"
@@ -604,8 +459,6 @@ export function TradeBottomPane({
                               : `3px solid ${borderColor}`,
                           }}
                           onClick={() => handleRowClick(ex)}
-                          onMouseEnter={(e) => handleRowMouseEnter(ex, e)}
-                          onMouseLeave={handleRowMouseLeave}
                         >
                           <td className="px-3 py-1.5 font-mono text-[var(--color-text-muted)]" title={ex.id}>
                             {ex.id.slice(0, 8)}
@@ -706,7 +559,7 @@ export function TradeBottomPane({
                               </button>
                             )}
                           </td>
-                        </tr>
+                        </ExecutorHoverRow>
                       );
                     })
                   )}
@@ -855,14 +708,6 @@ export function TradeBottomPane({
             )}
           </div>
         </div>
-      )}
-
-      {/* Hover tooltip */}
-      {hoveredExecutor && (
-        <ExecutorTooltip
-          executor={hoveredExecutor.executor}
-          anchorRect={hoveredExecutor.rect}
-        />
       )}
 
       {confirmResumeId && (
