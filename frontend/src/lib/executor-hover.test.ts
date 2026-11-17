@@ -109,11 +109,10 @@ describe("executor hover details", () => {
         { label: "Catch up", value: "Carry" },
         { label: "Reduce only", value: "No" },
         { label: "Avg fill", value: "0.0805" },
-        { label: "Net PnL", value: "+0.7500" },
         { label: "Started", value: formatStartMyt(STARTED) },
       ]),
     );
-    for (const dropped of ["Leverage", "Margin", "Realized", "Unrealized"]) {
+    for (const dropped of ["Leverage", "Margin", "Realized", "Unrealized", "Net PnL"]) {
       expect(model.rows.map((row) => row.label)).not.toContain(dropped);
     }
     expect(model.rows.find((row) => row.label === "Started")?.value).toContain("MYT");
@@ -147,7 +146,7 @@ describe("executor hover details", () => {
         close_type: "",
       }),
     );
-    expect(bare.rows.map((row) => row.label)).toEqual(["Net PnL"]);
+    expect(bare.rows).toEqual([]);
     expect(bare.orders).toEqual([]);
     expect(bare.closeType).toBe("");
     expect(bare.statusMessage).toBe("");

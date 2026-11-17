@@ -93,6 +93,7 @@ describe("executor row focus", () => {
     expect(open?.textContent).not.toContain("ISOLATED");
     expect(open?.textContent).not.toContain("1x");
     expect(open?.textContent).not.toContain("ex-9");
+    expect(open?.textContent).not.toContain("PnL");
     expect(open?.textContent).toContain("Cancel was not confirmed on the exchange");
     expect(row().getAttribute("aria-describedby")).toBe("executor-detail-ri-focus");
 

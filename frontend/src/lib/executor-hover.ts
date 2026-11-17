@@ -149,11 +149,6 @@ function priceText(value: number): string {
   return raw.replace(/(\.\d*?)0+$/, "$1").replace(/\.$/, "");
 }
 
-function money(value: number): string {
-  const sign = value > 0 ? "+" : value < 0 ? "-" : "";
-  return `${sign}${Math.abs(value).toFixed(4)}`;
-}
-
 function orderStatus(row: Record<string, unknown>): string {
   return text(pick(row, ["status", "state"])).replace(/^.*\./, "").toUpperCase();
 }
@@ -273,7 +268,6 @@ export function executorHoverModel(executor: ExecutorInfo, now = Date.now()): Ex
     "current_position_average_price",
   ]));
   if (avg != null && avg > 0) add("Avg fill", priceText(avg));
-  if (num(executor.pnl) != null) add("Net PnL", money(Number(executor.pnl)));
 
   if (started != null) add("Started", formatStartMyt(started));
 
