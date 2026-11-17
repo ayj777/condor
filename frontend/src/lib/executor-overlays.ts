@@ -64,6 +64,8 @@ export interface ExecutorOverlay {
   entryPrice?: number;
   /** Exit/current price for display */
   exitPrice?: number;
+  /** Executor custom_info, for fills and pause reasons the config does not hold. */
+  customInfo?: Record<string, unknown>;
 }
 
 // ── Helpers ──
@@ -168,6 +170,7 @@ function baseOverlay(
     fees: executor.cum_fees_quote,
     timeRange: range,
     config: executor.config,
+    customInfo: executor.custom_info,
     ...extras,
   };
 }
@@ -582,8 +585,48 @@ function computeGenericOverlay(executor: ExecutorInfo): ExecutorOverlay {
 
 // ── Public API ──
 
+function computeRangeIcebergOverlay(executor: ExecutorInfo): ExecutorOverlay {
+  const config = executor.config || {};
+  const info = executor.custom_info || {};
+  const num = (value: unknown) => {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : 0;
+  };
+  const mode = String(info.mode ?? config.mode ?? "RANGE").toUpperCase();
+  const low = num(config.price_low);
+  const high = num(config.price_high);
+  const limit = num(config.limit_price);
+  const range = lifetimeRange(executor);
+  let gridBox: GridBox | undefined;
+  const lines: PriceLine[] = [];
+  if (mode !== "UP_TO" && low > 0 && high > 0 && range.start > 0) {
+    gridBox = {
+      startTime: range.start,
+      endTime: range.end,
+      startPrice: high,
+      endPrice: low,
+      color: pnlHexColor(executor.pnl >= 0 ? 1 : -1),
+    };
+  } else if (limit > 0) {
+    lines.push({
+      price: limit,
+      label: "Limit",
+      color: "#f59e0b",
+      style: "dashed",
+    });
+  }
+  return baseOverlay(executor, "range_iceberg", {
+    priceLines: lines,
+    markers: [],
+    gridBox,
+    entryPrice: low || limit,
+    exitPrice: high,
+  }, range);
+}
+
 export function computeExecutorOverlay(executor: ExecutorInfo): ExecutorOverlay {
-  switch (executor.type?.toLowerCase()) {
+  const type = executor.type?.toLowerCase() ?? "";
+  switch (type) {
     case "position":
       return computePositionOverlay(executor);
     case "grid":
@@ -593,6 +636,7 @@ export function computeExecutorOverlay(executor: ExecutorInfo): ExecutorOverlay 
     case "lp":
       return computeLpOverlay(executor);
     default:
+      if (type.includes("range_iceberg")) return computeRangeIcebergOverlay(executor);
       return computeGenericOverlay(executor);
   }
 }
@@ -746,6 +790,9 @@ export function renderOverlayTooltipHtml(
       addRow("Upper Price", formatPriceSig(o.gridBox.startPrice));
       addRow("Lower Price", formatPriceSig(o.gridBox.endPrice));
       if (cfg.lp_provider != null) addRow("Provider", String(cfg.lp_provider));
+    } else if (o.type === "range_iceberg") {
+      addRow("Price high", formatPriceSig(o.gridBox.startPrice));
+      addRow("Price low", formatPriceSig(o.gridBox.endPrice));
     } else {
       addRow("Start Price", formatPriceSig(o.gridBox.startPrice));
       addRow("End Price", formatPriceSig(o.gridBox.endPrice));
@@ -756,6 +803,22 @@ export function renderOverlayTooltipHtml(
     if (exitPrice && exitPrice > 0 && exitPrice !== entryPrice) {
       addRow(active ? "Current" : "Close", formatPriceSig(exitPrice));
     }
+  }
+
+  if (o.type === "range_iceberg") {
+    const info = o.customInfo || {};
+    const filled = Number(info.filled_amount);
+    const total = Number(info.target_amount ?? cfg.total_amount);
+    if (Number.isFinite(filled)) {
+      addRow("Filled", Number.isFinite(total) && total > 0 ? `${filled} / ${total}` : String(filled));
+    }
+    if (info.unknown_order_halt === true) {
+      const reason = typeof info.status_reason === "string" && info.status_reason
+        ? info.status_reason
+        : "unknown_order_halt";
+      addRow("Paused", reason, red);
+    }
+    if (cfg.margin_mode != null) addRow("Margin", String(cfg.margin_mode));
   }
 
   if (cfg.leverage != null && Number(cfg.leverage) > 1) addRow("Leverage", `${cfg.leverage}x`);

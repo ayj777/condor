@@ -6,6 +6,18 @@ from typing import Any, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 
+def _extract_orders(result: Any) -> List[Dict[str, Any]]:
+    """Rows from a list, a ``data`` envelope, or an ``orders`` envelope."""
+    if isinstance(result, list):
+        return [row for row in result if isinstance(row, dict)]
+    if isinstance(result, dict):
+        for key in ("data", "orders"):
+            rows = result.get(key)
+            if isinstance(rows, list):
+                return [row for row in rows if isinstance(row, dict)]
+    return []
+
+
 async def fetch_active_orders(
     client,
     limit: str = "5",
@@ -35,7 +47,7 @@ async def fetch_active_orders(
         if trading_pairs:
             narrowed["trading_pairs"] = list(trading_pairs)
         result = await client.trading.get_active_orders(limit=int(limit), **narrowed)
-        return result.get("data", [])
+        return _extract_orders(result)
     except Exception as e:
         if strict:
             raise

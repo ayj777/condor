@@ -1,7 +1,6 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
-import { createPortal } from "react-dom";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { ChevronUp, ChevronDown, Loader2, Square, Trash2, Wallet, Clock, ArrowUpDown, ArrowUp, ArrowDown } from "lucide-react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { ChevronUp, ChevronDown, Loader2, Play, Square, Trash2, Wallet, Clock, ArrowUpDown, ArrowUp, ArrowDown } from "lucide-react";
 
 import { api, type ExecutorInfo, type ConsolidatedPosition } from "@/lib/api";
 import { useServer } from "@/hooks/useServer";
@@ -11,14 +10,28 @@ import {
   formatPct,
   formatAge,
   formatPriceSig,
-  formatUsd,
   pnlColor,
   pnlTextClass,
   isExecutorActive,
 } from "@/lib/formatters";
+import { childOrderIds, executorRunDetail, executorTypeLabel } from "@/lib/executor-run";
+import { ExecutorHoverRow } from "@/components/trade/ExecutorDetailPopup";
 import { stopKeepCopy } from "@/lib/executorStopCopy";
+import { defaultKeepPosition, executorBookSide } from "@/lib/trade-guards";
 import { executorsQuery } from "@/lib/queryClient";
 import { TRADE_BOTTOM_PANE_KEY } from "@/lib/sessionState";
+
+function stopCloseLine(ex: ExecutorInfo | undefined, venueAmount: number, side: string): string {
+  const filled = Number(ex?.custom_info?.filled_amount);
+  const filledOk = Number.isFinite(filled) && filled > 0;
+  const which = side === "LONG" ? "long" : side === "SHORT" ? "short" : "position";
+  if (venueAmount > (filledOk ? filled : 0) + 1e-9) {
+    const filledText = filledOk ? String(filled) : "0";
+    return `This stop will not close the ${which}. The exchange ${which} is ${venueAmount} and this executor filled ${filledText}. Keep the position.`;
+  }
+  const size = filledOk ? String(filled) : "only what it filled";
+  return `The executor stops and closes ${size} base on its own ${which}. It will not close more than it filled.`;
+}
 
 interface TradeBottomPaneProps {
   executors: ExecutorInfo[];
@@ -37,19 +50,19 @@ interface TradeBottomPaneProps {
   quoteSymbol?: string;
   selectedExecutorId?: string | null;
   onExecutorSelect?: (executor: ExecutorInfo | null) => void;
+  /** Working orders for this market. Off for venues with no order book. */
+  showOrders?: boolean;
 }
 
-const STRATEGY_LABELS: Record<string, string> = {
-  LIMIT: "Limit",
-  LIMIT_CHASER: "Chaser",
-  MARKET: "Market",
-  TWAP: "TWAP",
-};
+function formatPositionAmount(val: number): string {
+  const abs = Math.abs(val);
+  if (!Number.isFinite(abs)) return "0";
+  if (abs >= 1 && Number.isInteger(abs)) return abs.toLocaleString("en-US");
+  return abs.toLocaleString("en-US", { maximumFractionDigits: 4 });
+}
 
-function executorTypeLabel(ex: ExecutorInfo): string {
-  const strategy = String(ex.config?.execution_strategy ?? "").toUpperCase();
-  if (strategy && STRATEGY_LABELS[strategy]) return STRATEGY_LABELS[strategy];
-  return ex.type ? ex.type.charAt(0).toUpperCase() + ex.type.slice(1) : "—";
+function formatLeverage(val: number): string {
+  return Number.isInteger(val) ? String(val) : String(Math.round(val * 100) / 100);
 }
 
 function formatBalance(val: number): string {
@@ -72,137 +85,6 @@ function getEntryPrice(ex: ExecutorInfo): number {
 function getExitPrice(ex: ExecutorInfo): number {
   const ci = ex.custom_info || {};
   return Number(ci.close_price) || ex.current_price || 0;
-}
-
-// Hover tooltip component
-function ExecutorTooltip({
-  executor,
-  anchorRect,
-}: {
-  executor: ExecutorInfo;
-  anchorRect: DOMRect;
-}) {
-  const entry = getEntryPrice(executor);
-  const exit = getExitPrice(executor);
-  const config = executor.config || {};
-
-  const active = isExecutorActive(executor.status);
-
-  // Position tooltip using viewport-fixed coords (rendered via portal)
-  const tooltipHeight = 180; // approximate max height
-  // If tooltip would go above viewport top, flip it below the row
-  const flipBelow = anchorRect.top - tooltipHeight < 0;
-  const left = Math.min(
-    Math.max(anchorRect.left + anchorRect.width / 2 - 120, 8),
-    window.innerWidth - 260,
-  );
-
-  const slPct = Number(config.stop_loss);
-  const tpPct = Number(config.take_profit);
-  const leverage = Number(config.leverage);
-  const amount = Number(config.total_amount_quote) || Number(config.amount);
-
-  return createPortal(
-    <div
-      className="fixed z-[9999] pointer-events-none"
-      style={{
-        top: flipBelow ? anchorRect.bottom + 8 : anchorRect.top - 8,
-        left,
-        transform: flipBelow ? undefined : "translateY(-100%)",
-      }}
-    >
-      <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)]/95 backdrop-blur-sm shadow-xl p-3 w-[250px] text-[11px]">
-        {/* Header */}
-        <div className="flex items-center justify-between mb-2">
-          <span className="font-mono font-semibold text-[var(--color-text)]">
-            {executor.id.slice(0, 10)}…
-          </span>
-          <span
-            className={`rounded px-1.5 py-0.5 text-[9px] font-bold ${
-              active
-                ? "bg-[var(--color-green)]/20 text-[var(--color-green)]"
-                : "bg-[var(--color-text-muted)]/20 text-[var(--color-text-muted)]"
-            }`}
-          >
-            {executor.status}
-          </span>
-        </div>
-
-        {/* Price row */}
-        {(entry > 0 || exit > 0) && (
-          <div className="flex items-center gap-2 mb-1.5 text-[var(--color-text-muted)]">
-            {entry > 0 && (
-              <span>
-                Entry: <span className="text-[var(--color-text)] font-mono">{formatPriceSig(entry)}</span>
-              </span>
-            )}
-            {entry > 0 && exit > 0 && exit !== entry && <span>→</span>}
-            {exit > 0 && exit !== entry && (
-              <span>
-                {active ? "Now" : "Close"}:{" "}
-                <span className="text-[var(--color-text)] font-mono">{formatPriceSig(exit)}</span>
-              </span>
-            )}
-          </div>
-        )}
-
-        {/* Config details */}
-        <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[10px]">
-          {amount > 0 && (
-            <div>
-              <span className="text-[var(--color-text-muted)]">Amount: </span>
-              <span className="font-mono">{formatUsd(amount)}</span>
-            </div>
-          )}
-          {leverage > 1 && (
-            <div>
-              <span className="text-[var(--color-text-muted)]">Leverage: </span>
-              <span className="font-mono">{leverage}x</span>
-            </div>
-          )}
-          {slPct > 0 && slPct !== -1 && (
-            <div>
-              <span className="text-[var(--color-text-muted)]">SL: </span>
-              <span className="font-mono text-[var(--color-red)]">{(slPct * 100).toFixed(2)}%</span>
-            </div>
-          )}
-          {tpPct > 0 && tpPct !== -1 && (
-            <div>
-              <span className="text-[var(--color-text-muted)]">TP: </span>
-              <span className="font-mono text-[var(--color-green)]">{(tpPct * 100).toFixed(2)}%</span>
-            </div>
-          )}
-          {executor.type === "grid" && !!config.start_price && (
-            <div className="col-span-2">
-              <span className="text-[var(--color-text-muted)]">Range: </span>
-              <span className="font-mono">
-                {formatPriceSig(Number(config.start_price as number))} – {formatPriceSig(Number(config.end_price as number))}
-              </span>
-            </div>
-          )}
-          {executor.close_type && !active && (
-            <div className="col-span-2">
-              <span className="text-[var(--color-text-muted)]">Close: </span>
-              <span>{executor.close_type.replace(/_/g, " ")}</span>
-            </div>
-          )}
-        </div>
-
-        {/* Arrow */}
-        {!flipBelow && (
-          <div className="absolute bottom-0 left-1/2 -translate-x-1/2 translate-y-full">
-            <div className="w-0 h-0 border-l-[6px] border-r-[6px] border-t-[6px] border-l-transparent border-r-transparent border-t-[var(--color-border)]" />
-          </div>
-        )}
-        {flipBelow && (
-          <div className="absolute top-0 left-1/2 -translate-x-1/2 -translate-y-full">
-            <div className="w-0 h-0 border-l-[6px] border-r-[6px] border-b-[6px] border-l-transparent border-r-transparent border-b-[var(--color-border)]" />
-          </div>
-        )}
-      </div>
-    </div>,
-    document.body,
-  );
 }
 
 function SortTh<T extends string>({
@@ -245,6 +127,7 @@ export function TradeBottomPane({
   quoteSymbol,
   selectedExecutorId,
   onExecutorSelect,
+  showOrders = false,
 }: TradeBottomPaneProps) {
   const { server } = useServer();
   const queryClient = useQueryClient();
@@ -252,14 +135,13 @@ export function TradeBottomPane({
   const [expanded, setExpanded] = useState(() => {
     try { return localStorage.getItem(TRADE_BOTTOM_PANE_KEY) !== "0"; } catch { return true; }
   });
-  const [tab, setTab] = useState<"executors" | "positions">("executors");
+  const [tab, setTab] = useState<"executors" | "positions" | "orders">("executors");
   const [stoppingIds, setStoppingIds] = useState<Set<string>>(new Set());
   const [confirmStopId, setConfirmStopId] = useState<string | null>(null);
-  const [keepPosition, setKeepPosition] = useState(false);
+  const [keepPosition, setKeepPosition] = useState(true);
+  const [confirmResumeId, setConfirmResumeId] = useState<string | null>(null);
   const [confirmClearPos, setConfirmClearPos] = useState<ConsolidatedPosition | null>(null);
   const [clearingPositions, setClearingPositions] = useState<Set<string>>(new Set());
-  const [hoveredExecutor, setHoveredExecutor] = useState<{ executor: ExecutorInfo; rect: DOMRect } | null>(null);
-
   useEffect(() => {
     try { localStorage.setItem(TRADE_BOTTOM_PANE_KEY, expanded ? "1" : "0"); } catch { /* ok */ }
   }, [expanded]);
@@ -301,6 +183,38 @@ export function TradeBottomPane({
     },
   });
 
+  const [resumeError, setResumeError] = useState<string | null>(null);
+  const resumeMutation = useMutation({
+    mutationFn: (id: string) => api.resumeExecutor(server!, id),
+    onSuccess: () => setResumeError(null),
+    onError: (error: Error) => setResumeError(error.message),
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: executorsQuery(server).prefix });
+    },
+  });
+
+  const ordersQuery = useQuery({
+    queryKey: ["active-orders", server, connector, pair],
+    queryFn: () => api.getActiveOrders(server!, connector, pair),
+    enabled: !!server && showOrders && expanded,
+    refetchInterval: expanded && showOrders ? 5_000 : false,
+    retry: false,
+  });
+  const openOrders = ordersQuery.data?.orders ?? [];
+  const resumeSupport = useQuery({
+    queryKey: ["resume-supported", server],
+    queryFn: () => api.resumeSupported(server!),
+    enabled: !!server,
+    retry: false,
+  });
+  const cancelMutation = useMutation({
+    mutationFn: ({ orderId, account }: { orderId: string; account?: string | null }) =>
+      api.cancelOrder(server!, connector, orderId, account),
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: ["active-orders", server, connector, pair] });
+    },
+  });
+
   const clearPositionMutation = useMutation({
     mutationFn: (pos: ConsolidatedPosition) => {
       const key = `${pos.connector_name}:${pos.trading_pair}:${pos.position_side}`;
@@ -324,10 +238,26 @@ export function TradeBottomPane({
     },
   });
 
+  const venueAmount = useMemo(
+    () => positions.reduce((max, pos) => (
+      pos.source === "venue" ? Math.max(max, Math.abs(pos.amount)) : max
+    ), 0),
+    [positions],
+  );
+  const stopTarget = executors.find((ex) => ex.id === confirmStopId);
+  const stopSide = executorBookSide(stopTarget);
+  const stopVenueAmount = useMemo(() => {
+    if (!stopSide) return venueAmount;
+    return positions.reduce((max, pos) => {
+      if (pos.source !== "venue") return max;
+      if (executorBookSide({ position_side: pos.position_side }) !== stopSide) return max;
+      return Math.max(max, Math.abs(pos.amount));
+    }, 0);
+  }, [positions, stopSide, venueAmount]);
   const handleStop = useCallback((id: string) => {
-    setKeepPosition(false);
+    setKeepPosition(defaultKeepPosition(venueAmount));
     setConfirmStopId(id);
-  }, []);
+  }, [venueAmount]);
 
   const handleRowClick = useCallback(
     (ex: ExecutorInfo) => {
@@ -341,18 +271,6 @@ export function TradeBottomPane({
     },
     [onExecutorSelect, selectedExecutorId],
   );
-
-  const handleRowMouseEnter = useCallback(
-    (ex: ExecutorInfo, e: React.MouseEvent<HTMLTableRowElement>) => {
-      const rect = e.currentTarget.getBoundingClientRect();
-      setHoveredExecutor({ executor: ex, rect });
-    },
-    [],
-  );
-
-  const handleRowMouseLeave = useCallback(() => {
-    setHoveredExecutor(null);
-  }, []);
 
   // Currency conversion for the current pair's quote asset
   const quoteCurrency = pair.split("-")[1] || "USDT";
@@ -462,6 +380,18 @@ export function TradeBottomPane({
             >
               Executors ({executors.length})
             </button>
+            {showOrders && (
+              <button
+                onClick={() => setTab("orders")}
+                className={`flex-1 px-3 py-1.5 text-[11px] font-medium transition-colors ${
+                  tab === "orders"
+                    ? "border-b-2 border-[var(--color-primary)] text-[var(--color-primary)]"
+                    : "text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
+                }`}
+              >
+                Orders ({openOrders.length})
+              </button>
+            )}
             <button
               onClick={() => setTab("positions")}
               className={`flex-1 px-3 py-1.5 text-[11px] font-medium transition-colors ${
@@ -513,8 +443,9 @@ export function TradeBottomPane({
                       const exit = getExitPrice(ex);
                       const closeLabel = ex.close_type ? ex.close_type.replace(/_/g, " ") : "";
                       return (
-                        <tr
+                        <ExecutorHoverRow
                           key={ex.id}
+                          executor={ex}
                           className={`border-b border-[var(--color-border)]/30 transition-colors ${
                             isSelected
                               ? "bg-[var(--color-primary)]/10 hover:bg-[var(--color-primary)]/15"
@@ -528,8 +459,6 @@ export function TradeBottomPane({
                               : `3px solid ${borderColor}`,
                           }}
                           onClick={() => handleRowClick(ex)}
-                          onMouseEnter={(e) => handleRowMouseEnter(ex, e)}
-                          onMouseLeave={handleRowMouseLeave}
                         >
                           <td className="px-3 py-1.5 font-mono text-[var(--color-text-muted)]" title={ex.id}>
                             {ex.id.slice(0, 8)}
@@ -548,16 +477,34 @@ export function TradeBottomPane({
                             </span>
                           </td>
                           <td className="px-3 py-1.5">
-                            {active ? (
-                              <span className="inline-flex items-center gap-1 rounded-full bg-[var(--color-green)]/15 px-1.5 py-0.5 text-[9px] font-bold text-[var(--color-green)]">
-                                <span className="h-1.5 w-1.5 rounded-full bg-[var(--color-green)] animate-pulse" />
-                                ACTIVE
-                              </span>
-                            ) : (
-                              <span className="rounded px-1.5 py-0.5 text-[9px] font-medium bg-[var(--color-text-muted)]/10 text-[var(--color-text-muted)] capitalize">
-                                {closeLabel || ex.status}
-                              </span>
-                            )}
+                            {(() => {
+                              const detail = executorRunDetail(ex);
+                              return (
+                                <div className="flex flex-col gap-0.5">
+                                  {active ? (
+                                    <span className="inline-flex w-fit items-center gap-1 rounded-full bg-[var(--color-green)]/15 px-1.5 py-0.5 text-[9px] font-bold text-[var(--color-green)]">
+                                      <span className="h-1.5 w-1.5 rounded-full bg-[var(--color-green)] animate-pulse" />
+                                      {detail.halt ? "PAUSED" : "ACTIVE"}
+                                    </span>
+                                  ) : (
+                                    <span className="rounded px-1.5 py-0.5 text-[9px] font-medium bg-[var(--color-text-muted)]/10 text-[var(--color-text-muted)] capitalize">
+                                      {closeLabel || ex.status}
+                                    </span>
+                                  )}
+                                  {detail.filled && (
+                                    <span className="font-mono text-[9px] text-[var(--color-text-muted)]">
+                                      filled {detail.filled}
+                                    </span>
+                                  )}
+                                  {detail.halt && (
+                                    <span className="text-[9px] text-[var(--color-red)]" title={detail.halt}>
+                                      {detail.halt}
+                                      {childOrderIds(ex).length > 0 ? ` (${childOrderIds(ex).join(", ")})` : ""}
+                                    </span>
+                                  )}
+                                </div>
+                              );
+                            })()}
                           </td>
                           <td className="px-3 py-1.5 text-right font-mono tabular-nums text-[var(--color-text-muted)]">
                             {entry > 0 ? formatPriceSig(entry) : "—"}
@@ -587,6 +534,16 @@ export function TradeBottomPane({
                             </span>
                           </td>
                           <td className="px-2 py-1.5 text-center" onClick={(e) => e.stopPropagation()}>
+                            {active && resumeSupport.data?.supported === true && executorRunDetail(ex).canResume && (
+                              <button
+                                onClick={() => setConfirmResumeId(ex.id)}
+                                disabled={resumeMutation.isPending}
+                                className="rounded p-0.5 text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-primary)]/20 hover:text-[var(--color-primary)] disabled:opacity-50"
+                                title="Resume executor"
+                              >
+                                <Play className="h-3 w-3" />
+                              </button>
+                            )}
                             {active && (
                               <button
                                 onClick={() => handleStop(ex.id)}
@@ -602,12 +559,54 @@ export function TradeBottomPane({
                               </button>
                             )}
                           </td>
-                        </tr>
+                        </ExecutorHoverRow>
                       );
                     })
                   )}
                 </tbody>
               </table>
+            )}
+
+            {tab === "orders" && showOrders && (
+              <div className="space-y-1 p-2">
+                {ordersQuery.isLoading ? (
+                  <p className="py-3 text-center text-[var(--color-text-muted)]">Loading orders...</p>
+                ) : ordersQuery.isError ? (
+                  <p className="py-3 text-center text-[var(--color-red)]">
+                    {(ordersQuery.error as Error).message || "Could not load open orders"}
+                  </p>
+                ) : openOrders.length === 0 ? (
+                  <p className="py-3 text-center text-[var(--color-text-muted)]">No open orders for this pair</p>
+                ) : (
+                  openOrders.map((order) => (
+                    <div
+                      key={order.client_order_id}
+                      className="flex items-center justify-between rounded border border-[var(--color-border)]/50 bg-[var(--color-bg)] px-2.5 py-1.5 text-[11px]"
+                    >
+                      <div className="flex items-center gap-2">
+                        <span className="text-[10px] font-semibold uppercase">{order.trade_type || "—"}</span>
+                        <span className="font-mono">{order.amount}</span>
+                        <span className="text-[var(--color-text-muted)]">@ {formatPriceSig(order.price)}</span>
+                        <span className="text-[var(--color-text-muted)]">{order.order_type}</span>
+                      </div>
+                      <button
+                        onClick={() => cancelMutation.mutate({
+                          orderId: order.client_order_id,
+                          account: order.account_name,
+                        })}
+                        disabled={cancelMutation.isPending || !order.client_order_id}
+                        className="rounded px-1.5 py-0.5 text-[10px] text-[var(--color-text-muted)] hover:bg-[var(--color-red)]/20 hover:text-[var(--color-red)] disabled:opacity-50"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  ))
+                )}
+              </div>
+            )}
+
+            {resumeError && (
+              <p className="px-3 py-1 text-[10px] text-[var(--color-red)]">{resumeError}</p>
             )}
 
             {tab === "positions" && (
@@ -648,7 +647,7 @@ export function TradeBottomPane({
                               </span>
                             )}
                             <div className="text-[11px]">
-                              <span className="text-[var(--color-text)]">{Math.abs(pos.amount).toFixed(4)}</span>
+                              <span className="text-[var(--color-text)]">{formatPositionAmount(pos.amount)}</span>
                               <span className="ml-1 text-[var(--color-text-muted)]">
                                 (${(pos.notional_value ?? Math.abs(pos.amount) * pos.entry_price).toFixed(2)})
                               </span>
@@ -656,17 +655,23 @@ export function TradeBottomPane({
                             </div>
                           </div>
                           <div className="flex items-center gap-3 text-[11px]">
-                            {!isFlat && (
+                            {pos.source === "venue" && (
+                              <span className="rounded border border-[var(--color-border)] px-1 py-0.5 text-[9px] text-[var(--color-text-muted)]">
+                                exchange
+                              </span>
+                            )}
+                            {!isFlat && pos.current_price > 0 && (
                               <span className="text-[var(--color-text-muted)]">
                                 Now: {formatPriceSig(pos.current_price)}
                               </span>
                             )}
-                            {pos.leverage > 1 && (
-                              <span className="text-[10px] text-[var(--color-text-muted)]">{pos.leverage}x</span>
+                            {pos.leverage != null && pos.leverage >= 1 && (
+                              <span className="text-[10px] text-[var(--color-text-muted)]">{formatLeverage(pos.leverage)}x</span>
                             )}
                             <span className={`font-mono font-medium ${pnlTextClass(pos.unrealized_pnl)}`}>
                               {fmtPnl(pos.unrealized_pnl)}
                             </span>
+                            {pos.source !== "venue" && (
                             <button
                               onClick={() => setConfirmClearPos(pos)}
                               disabled={isClearing}
@@ -679,6 +684,7 @@ export function TradeBottomPane({
                                 <Trash2 className="h-3 w-3" />
                               )}
                             </button>
+                            )}
                           </div>
                         </div>
                         <div className="mt-1 flex items-center gap-3 text-[10px] text-[var(--color-text-muted)]">
@@ -704,12 +710,32 @@ export function TradeBottomPane({
         </div>
       )}
 
-      {/* Hover tooltip */}
-      {hoveredExecutor && (
-        <ExecutorTooltip
-          executor={hoveredExecutor.executor}
-          anchorRect={hoveredExecutor.rect}
-        />
+      {confirmResumeId && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+          <div className="max-w-sm rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4 shadow-xl">
+            <p className="text-sm text-[var(--color-text)]">Resume this executor?</p>
+            <p className="mt-1 text-[11px] text-[var(--color-text-muted)]">
+              Child orders: {childOrderIds(executors.find((ex) => ex.id === confirmResumeId)).join(", ") || "none listed"}
+            </p>
+            <div className="mt-3 flex justify-end gap-2">
+              <button
+                onClick={() => setConfirmResumeId(null)}
+                className="rounded px-3 py-1.5 text-xs text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => {
+                  resumeMutation.mutate(confirmResumeId);
+                  setConfirmResumeId(null);
+                }}
+                className="rounded bg-[var(--color-primary)] px-3 py-1.5 text-xs font-medium text-white"
+              >
+                Resume
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Stop confirmation */}
@@ -729,7 +755,7 @@ export function TradeBottomPane({
               <span className="text-xs text-[var(--color-text)]">{stopCopy.label}</span>
             </label>
             <p className="mt-1 ml-6 text-[11px] text-[var(--color-text-muted)]">
-              {keepPosition ? stopCopy.checked : stopCopy.unchecked}
+              {keepPosition ? stopCopy.checked : stopCloseLine(executors.find((ex) => ex.id === confirmStopId), stopVenueAmount, stopSide)}
             </p>
             <div className="mt-3 flex justify-end gap-2">
               <button

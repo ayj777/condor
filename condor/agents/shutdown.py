@@ -121,10 +121,12 @@ def _is_perp(connector: str) -> bool:
     ``binance_perpetual``). Unknown/ambiguous connectors are treated as perp so a
     kill switch errs toward *closing* leveraged risk rather than leaving it open.
     """
-    c = (connector or "").lower()
+    c = (connector or "").strip()
     if not c:
         return True
-    return "perpetual" in c or c.endswith("_perp")
+    from condor.venue_capabilities import is_perpetual_connector
+
+    return is_perpetual_connector(c)
 
 
 def _keep_position(executor: dict, policy: ShutdownPolicy) -> bool:

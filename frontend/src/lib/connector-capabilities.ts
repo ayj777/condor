@@ -38,11 +38,65 @@ export interface VenueTraits {
   credentialed: boolean;
 }
 
+/**
+ * Facts recorded for a connector whose name is not a sufficient description.
+ *
+ * The venue list still decides whether the book, the rules and the credentials
+ * exist. This only adds what those traits cannot say: margin modes, whether a
+ * range iceberg order is a real executor here, and which order types the
+ * connector accepts when a pair has not reported its own. Unknown venues get
+ * no profile, and every capability they already had stays as it was.
+ */
+export interface TradingProfile {
+  perpetual: boolean;
+  leverage: boolean;
+  marginModes: string[];
+  positionModes: string[];
+  orderTypes: string[];
+  reduceOnly: boolean;
+  rangeIceberg: boolean;
+  /** A limit or market order has to set leverage on the account before create. */
+  confirmsAccountSettings: boolean;
+  /**
+   * The range iceberg executor treats a missing margin mode as "do not touch
+   * margin". True only where that executor is deployed. The MEXC value
+   * requires ayj777/hummingbot PR 3 or later.
+   */
+  rangeIcebergOmitsMargin: boolean;
+}
+
+const TRADING_PROFILES: Record<string, TradingProfile> = {
+  mexc_perpetual: {
+    perpetual: true,
+    leverage: true,
+    marginModes: ["ISOLATED", "CROSS"],
+    // The connector supports both. It reads the account's mode from MEXC and
+    // refuses to trade until that read succeeds, so the form does not set it.
+    positionModes: ["ONEWAY", "HEDGE"],
+    orderTypes: ["LIMIT", "MARKET", "LIMIT_MAKER"],
+    reduceOnly: true,
+    rangeIceberg: true,
+    confirmsAccountSettings: true,
+    // Requires ayj777/hummingbot PR 3 or later.
+    rangeIcebergOmitsMargin: true,
+  },
+};
+
+export function tradingProfile(connector: string): TradingProfile | null {
+  return TRADING_PROFILES[connector] ?? null;
+}
+
 export interface ConnectorCapabilities {
   /** Executor types this venue supports. */
   executorTypes: ExecutorType[];
   /** Allowed `execution_strategy` values (subset of OrderConfigPanel's options). */
   orderStrategies: string[];
+  /** Margin modes the order form may offer. Empty means the form shows none. */
+  marginModes: string[];
+  /** Whether this venue's account settings are applied before a plain order. */
+  confirmsAccountSettings: boolean;
+  /** Whether a range iceberg may omit margin. False refuses the iceberg. */
+  rangeIcebergOmitsMargin: boolean;
   /** Whether `/market/order-book` and `/market/tickers` answer — depth + markets tabs. */
   hasOrderBook: boolean;
   /** Whether `/market/trading-rules` answers — pair list + price precision. */
@@ -92,19 +146,35 @@ export function connectorCapabilities(
       ? venues.get(connector)
       : venues.find((v) => v.name === connector)) ?? UNKNOWN_VENUE;
 
+  const profile = tradingProfile(connector);
   // Without a Hummingbot market feed there is no resting order book to post to, so
   // MARKET is the only execution strategy that means anything, and the executors
   // that manage resting orders (position/grid/dca) have nothing to manage.
   const executorTypes: ExecutorType[] = traits.hummingbotMarketData
     ? ["order", "position", "grid", "dca"]
     : ["order"];
+  // Its own tab, beside Order. The order dropdown also lists the strategy, so
+  // either door submits a range_iceberg_executor.
+  if (profile?.rangeIceberg) {
+    const afterOrder = executorTypes.indexOf("order");
+    executorTypes.splice(afterOrder + 1, 0, "iceberg");
+  }
   if (traits.clmmLp) executorTypes.push("lp");
+  const orderStrategies = traits.hummingbotMarketData
+    ? ["MARKET", "LIMIT", "LIMIT_MAKER", "LIMIT_CHASER"]
+    : ["MARKET"];
+  // Range iceberg is an executor, not a native order type, so it is added
+  // rather than filtered out of the list the other venues already share.
+  if (profile?.rangeIceberg && !orderStrategies.includes("RANGE_ICEBERG")) {
+    orderStrategies.push("RANGE_ICEBERG");
+  }
 
   return {
     executorTypes,
-    orderStrategies: traits.hummingbotMarketData
-      ? ["MARKET", "LIMIT", "LIMIT_MAKER", "LIMIT_CHASER"]
-      : ["MARKET"],
+    orderStrategies,
+    marginModes: profile?.marginModes ?? [],
+    confirmsAccountSettings: profile?.confirmsAccountSettings ?? false,
+    rangeIcebergOmitsMargin: profile?.rangeIcebergOmitsMargin ?? false,
     hasOrderBook: traits.hummingbotMarketData,
     hasTradingRules: traits.hummingbotMarketData,
     hasRestPrice: traits.hummingbotMarketData,

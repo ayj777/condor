@@ -395,7 +395,34 @@ async def create_executor_endpoint(
 
     await _ensure_dex_tokens_listed(client, config)
 
+    from condor.fetchers.account_settings import (
+        AccountSettingsError,
+        apply_venue_account_settings,
+        strip_order_only_fields,
+    )
     from condor.fetchers.executors import create_executor
+    from condor.venue_capabilities import iceberg_margin_block
+
+    blocked = iceberg_margin_block(
+        str(config.get("connector_name") or ""), body.executor_type
+    )
+    if blocked:
+        raise HTTPException(status_code=400, detail=blocked)
+
+    margin_applied = None
+    try:
+        # Before the create, and before unknown fields are stripped. This does
+        # not call set_leverage. Margin is omitted unless the user edited it.
+        # It refuses the create when the open book cannot be read.
+        margin_applied = await apply_venue_account_settings(
+            client, body.account_name, config
+        )
+    except AccountSettingsError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.exception("Failed to apply account settings on '%s'", name)
+        raise upstream_error("Failed to set leverage or margin mode", e)
+    strip_order_only_fields(body.executor_type, config)
 
     try:
         # No controller_id: the fetcher takes none, so the trading API applies its
@@ -416,7 +443,13 @@ async def create_executor_endpoint(
             f"{config.get('trading_pair') or '?'}"
         ),
     )
-    return {"status": "ok", "executor_id": executor_id}
+    response = {"status": "ok", "executor_id": executor_id}
+    # Present only when this venue confirms account settings. False means the
+    # user asked for a margin change and this API could not apply it. The mode
+    # was removed from the config either way.
+    if margin_applied is not None:
+        response["margin_mode_applied"] = margin_applied
+    return response
 
 
 @router.post("/servers/{name}/executors/{executor_id}/stop")
@@ -432,6 +465,8 @@ async def stop_executor_endpoint(
 
     from condor.fetchers.executors import stop_executor
 
+    if not keep_position:
+        await _refuse_oversized_close(client, executor_id)
     try:
         result = await stop_executor(client, executor_id, keep_position=keep_position)
     except Exception as e:
@@ -443,6 +478,307 @@ async def stop_executor_endpoint(
         summary=f"Stop executor {executor_id[:12]}...{suffix}",
     )
     return {"status": "ok", "result": result}
+
+
+@router.post("/servers/{name}/executors/{executor_id}/resume")
+async def resume_executor_endpoint(
+    name: str,
+    executor_id: str,
+    user: WebUser = Depends(require_server_access),
+):
+    """Resume a paused executor.
+
+    The stock client has no resume method. This route then answers 501 and
+    the trade page hides the button. When the method exists, a child size
+    that is off the pair step is refused so resume does not repeat it.
+    """
+    cm = get_config_manager()
+    client = await cm.get_client(name)
+
+    from condor.fetchers.executors import describe_executor_error
+
+    if not _resume_method(client):
+        raise HTTPException(
+            status_code=501,
+            detail="This trading API does not support resuming executors",
+        )
+    await _refuse_offstep_resume(client, executor_id)
+    try:
+        result = await _resume_executor(client, executor_id)
+    except Exception as e:
+        status, _message = describe_executor_error(e)
+        if status == 404:
+            raise HTTPException(
+                status_code=501,
+                detail="This trading API does not support resuming executors",
+            )
+        raise upstream_error("Failed to resume executor", e)
+    record_ui_deed(
+        user,
+        verb="resume_executor",
+        summary=f"Resume executor {executor_id[:12]}...",
+    )
+    return {"status": "ok", "result": result}
+
+
+def _resume_method(client):
+    executors = getattr(client, "executors", None)
+    method = getattr(executors, "resume_executor", None)
+    return method
+
+
+async def _resume_executor(client, executor_id: str):
+    method = _resume_method(client)
+    if method is None:
+        raise HTTPException(
+            status_code=501,
+            detail="This trading API does not support resuming executors",
+        )
+    return await method(executor_id)
+
+
+@router.get("/servers/{name}/executors/resume-supported")
+async def resume_supported(
+    name: str,
+    user: WebUser = Depends(require_server_access),
+):
+    """Whether this API client can resume an executor. The button stays hidden when it cannot."""
+    cm = get_config_manager()
+    client = await cm.get_client(name)
+    return {"supported": _resume_method(client) is not None}
+
+
+@router.post("/servers/{name}/account/leverage")
+async def confirm_account_leverage(
+    name: str,
+    body: dict,
+    user: WebUser = Depends(require_server_access),
+):
+    """Set leverage on its own. Placing an order does not call this."""
+    from condor.fetchers.account_settings import AccountSettingsError, confirm_leverage
+
+    cm = get_config_manager()
+    client = await cm.get_client(name)
+    try:
+        leverage = int(float(body.get("leverage")))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Leverage must be at least 1.")
+    try:
+        await confirm_leverage(
+            client,
+            str(body.get("account_name") or "master_account"),
+            str(body.get("connector_name") or ""),
+            str(body.get("trading_pair") or ""),
+            leverage,
+            body.get("side"),
+        )
+    except AccountSettingsError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.exception("Failed to set leverage on '%s'", name)
+        raise upstream_error("Failed to set leverage", e)
+    record_ui_deed(
+        user,
+        verb="set_leverage",
+        summary=f"Set leverage {leverage} on {body.get('trading_pair') or '?'}",
+    )
+    return {"status": "ok"}
+
+
+def _row_side(raw: object) -> str:
+    text = str(raw or "").strip()
+    if "." in text:
+        text = text.rsplit(".", 1)[-1]
+    text = text.upper()
+    if text in ("LONG", "BUY", "1"):
+        return "LONG"
+    if text in ("SHORT", "SELL", "2"):
+        return "SHORT"
+    return ""
+
+
+def executor_book_side(executor: dict) -> str:
+    """The position side this executor filled, not the other hedge side.
+
+    An explicit position side wins. Otherwise an open buy is a long and an
+    open sell is a short. A close sell reduces a long, and a close buy
+    reduces a short. Empty means the side could not be read.
+    """
+    config = executor.get("config") if isinstance(executor.get("config"), dict) else {}
+    explicit = _row_side(config.get("position_side") or executor.get("position_side"))
+    if explicit:
+        return explicit
+    action = str(
+        config.get("position_action") or executor.get("position_action") or "OPEN"
+    ).upper()
+    if "." in action:
+        action = action.rsplit(".", 1)[-1]
+    trade = _row_side(config.get("side") or executor.get("side"))
+    if action == "CLOSE":
+        if trade == "SHORT":
+            return "LONG"
+        if trade == "LONG":
+            return "SHORT"
+        return ""
+    return trade
+
+
+def _filled_base(executor: dict) -> float:
+    info = (
+        executor.get("custom_info")
+        if isinstance(executor.get("custom_info"), dict)
+        else {}
+    )
+    for value in (
+        info.get("filled_amount"),
+        executor.get("filled_amount"),
+        info.get("filled_base"),
+    ):
+        try:
+            if value is None or value == "":
+                continue
+            return abs(float(value))
+        except (TypeError, ValueError):
+            continue
+    return 0.0
+
+
+async def _refuse_oversized_close(client, executor_id: str) -> None:
+    """A close sells only what this executor filled, and only reduce-only.
+
+    The stock stop call has no reduce-only size. When the exchange position is
+    larger than the fill, the stop is refused instead of closing the rest.
+    """
+    try:
+        executor = await client.executors.get_executor(executor_id)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot read what this executor filled, so it was not closed.",
+        ) from exc
+    if not isinstance(executor, dict):
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot read what this executor filled, so it was not closed.",
+        )
+    config = executor.get("config") if isinstance(executor.get("config"), dict) else {}
+    connector = str(
+        executor.get("connector_name") or config.get("connector_name") or ""
+    )
+    pair = str(executor.get("trading_pair") or config.get("trading_pair") or "")
+    filled = _filled_base(executor)
+    try:
+        from condor.fetchers.positions import fetch_positions
+
+        rows = await fetch_positions(
+            client, connector_name=connector or None, strict=True
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot read the exchange position, so the stop will not close it.",
+        ) from exc
+    want = pair.replace("_", "-").upper()
+    side = executor_book_side(executor)
+    venue = 0.0
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        row_pair = str(row.get("trading_pair") or "").replace("_", "-").upper()
+        if want and row_pair != want:
+            continue
+        row_side = _row_side(row.get("position_side") or row.get("side"))
+        if side and row_side != side:
+            continue
+        try:
+            amount = abs(float(row.get("amount") or 0))
+        except (TypeError, ValueError):
+            amount = 0.0
+        venue = max(venue, amount)
+    if venue > filled + 1e-9:
+        which = f" of the {side.lower()}" if side else ""
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"This stop would close {venue:g}{which} but the executor only "
+                f"filled {filled:g}. Keep the position."
+            ),
+        )
+
+
+def _child_amounts(executor: dict) -> list[float]:
+    info = (
+        executor.get("custom_info")
+        if isinstance(executor.get("custom_info"), dict)
+        else {}
+    )
+    amounts: list[float] = []
+    levels = info.get("levels")
+    if isinstance(levels, list):
+        for level in levels:
+            if not isinstance(level, dict):
+                continue
+            try:
+                amount = float(level.get("amount") or 0)
+            except (TypeError, ValueError):
+                continue
+            if amount > 0:
+                amounts.append(amount)
+    return amounts
+
+
+async def _refuse_offstep_resume(client, executor_id: str) -> None:
+    """Do not resume by repeating a child size that is off the pair step."""
+    try:
+        executor = await client.executors.get_executor(executor_id)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot read this executor, so it was not resumed.",
+        ) from exc
+    if not isinstance(executor, dict):
+        raise HTTPException(
+            status_code=400, detail="Cannot read this executor, so it was not resumed."
+        )
+    amounts = _child_amounts(executor)
+    if not amounts:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot read the child order sizes, so resume was not sent.",
+        )
+    config = executor.get("config") if isinstance(executor.get("config"), dict) else {}
+    connector = str(
+        executor.get("connector_name") or config.get("connector_name") or ""
+    )
+    pair = str(executor.get("trading_pair") or config.get("trading_pair") or "")
+    try:
+        from condor.fetchers.trading_rules import fetch_trading_rules
+
+        rules = await fetch_trading_rules(client, connector_name=connector, strict=True)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot check the child size step, so resume was not sent.",
+        ) from exc
+    rule = {}
+    if isinstance(rules, dict):
+        rule = rules.get(pair) or rules.get(pair.replace("-", "_")) or {}
+    try:
+        step = float((rule or {}).get("min_base_amount_increment") or 0)
+    except (TypeError, ValueError):
+        step = 0.0
+    if step <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot check the child size step, so resume was not sent.",
+        )
+    for amount in amounts:
+        steps = amount / step
+        if abs(steps - round(steps)) > 1e-6:
+            raise HTTPException(
+                status_code=400,
+                detail=f"A child order of {amount:g} is not a multiple of {step:g}, so resume was not sent.",
+            )
 
 
 @router.get("/servers/{name}/executors/positions")

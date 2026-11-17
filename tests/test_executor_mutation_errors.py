@@ -213,7 +213,17 @@ def test_a_successful_create_still_returns_the_executor_id(route_env):
 
 
 def test_a_failed_stop_does_not_answer_ok(route_env):
-    route_env(FakeClient(exc=_transport_error()))
+    client = FakeClient(exc=_transport_error())
+
+    async def get_executor(executor_id):
+        return {"custom_info": {"filled_amount": 0}, "config": {}}
+
+    async def get_positions(**_kwargs):
+        return {"data": []}
+
+    client.executors.get_executor = get_executor
+    client.trading = SimpleNamespace(get_positions=get_positions)
+    route_env(client)
 
     with pytest.raises(HTTPException) as caught:
         asyncio.run(

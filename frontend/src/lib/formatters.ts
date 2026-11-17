@@ -517,7 +517,10 @@ export function formatConnectorName(name: string) {
   return name
     .replace(/_perpetual$/, " perp")
     .replace(/_/g, " ")
-    .replace(/\b\w/g, (c) => c.toUpperCase());
+    .replace(/\b\w+/g, (word) => {
+      if (word.toLowerCase() === "mexc") return "MEXC";
+      return word.charAt(0).toUpperCase() + word.slice(1);
+    });
 }
 
 /**

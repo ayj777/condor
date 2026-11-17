@@ -16,6 +16,7 @@ import { describe, expect, it } from "vitest";
 import {
   connectorCapabilities,
   orderBookVenues,
+  tradingProfile,
   type VenueTraits,
 } from "./connector-capabilities";
 
@@ -67,6 +68,34 @@ describe("connectorCapabilities canTrade", () => {
     const caps = connectorCapabilities("solana-mainnet-beta", VENUES);
     expect(caps.canTrade).toBe(true);
     expect(caps.supportsLp).toBe(true);
+  });
+});
+
+describe("mexc_perpetual", () => {
+  const mexc = venue({ name: "mexc_perpetual" });
+
+  it("is a tradable order-book venue with range iceberg and both margin modes", () => {
+    const caps = connectorCapabilities("mexc_perpetual", [mexc]);
+    expect(caps.canTrade).toBe(true);
+    expect(caps.hasOrderBook).toBe(true);
+    expect(caps.orderStrategies).toContain("LIMIT");
+    expect(caps.orderStrategies).toContain("MARKET");
+    expect(caps.orderStrategies).toContain("RANGE_ICEBERG");
+    expect(caps.executorTypes).toContain("iceberg");
+    expect(caps.marginModes).toEqual(["ISOLATED", "CROSS"]);
+    expect(caps.confirmsAccountSettings).toBe(true);
+    expect(caps.rangeIcebergOmitsMargin).toBe(true);
+  });
+
+  it("does not add range iceberg to the other perpetual venues", () => {
+    expect(connectorCapabilities("hyperliquid_perpetual", VENUES).orderStrategies).not.toContain(
+      "RANGE_ICEBERG",
+    );
+    expect(connectorCapabilities("hyperliquid_perpetual", VENUES).executorTypes).not.toContain(
+      "iceberg",
+    );
+    expect(tradingProfile("mexc_perpetual")?.positionModes).toContain("ONEWAY");
+    expect(tradingProfile("mexc_perpetual")?.reduceOnly).toBe(true);
   });
 });
 

@@ -8,15 +8,54 @@ from condor.fetchers._pagination import collect_pages
 
 logger = logging.getLogger(__name__)
 
+
+class PositionBookError(Exception):
+    """The server returned rows, and none of them were this connector."""
+
+
 # Cap on how many positions a single walk accumulates (not on iterations:
 # the walker's own empty-page and cursor-progress guards end a stalled walk).
 MAX_POSITIONS_FETCH = 2000
 POSITIONS_PAGE_SIZE = 200
 
 
+def _keep_for_connector(
+    rows: List[Dict[str, Any]], connector_name: str
+) -> tuple[List[Dict[str, Any]], int]:
+    """Rows the server already scoped to this connector.
+
+    A missing ``connector_name`` is kept: the request already asked for this
+    connector. A name that differs only by case is the same connector. A
+    different name is dropped, and the dropped count tells the caller that an
+    empty result is a filter mismatch rather than a flat account.
+    """
+    want = connector_name.strip().lower()
+    kept: List[Dict[str, Any]] = []
+    dropped = 0
+    for row in rows:
+        name = str(row.get("connector_name") or "").strip()
+        if not name or name.lower() == want:
+            kept.append(row)
+        else:
+            dropped += 1
+    return kept, dropped
+
+
 def _extract_positions(result: Any) -> List[Dict[str, Any]]:
-    """Rows out of one ``get_positions`` page."""
-    return result.get("data", []) if isinstance(result, dict) else []
+    """Rows out of one ``get_positions`` page.
+
+    The stock client returns ``{"data": [...]}``. A fork that answers with the
+    list itself, or nests it under ``positions``, used to be read as an empty
+    book, and the trade page then said the account was flat.
+    """
+    if isinstance(result, list):
+        return [row for row in result if isinstance(row, dict)]
+    if isinstance(result, dict):
+        for key in ("data", "positions"):
+            rows = result.get(key)
+            if isinstance(rows, list):
+                return [row for row in rows if isinstance(row, dict)]
+    return []
 
 
 async def fetch_positions(
@@ -63,9 +102,12 @@ async def fetch_positions(
         )
 
         if connector_name and positions:
-            positions = [
-                p for p in positions if p.get("connector_name") == connector_name
-            ]
+            positions, dropped = _keep_for_connector(positions, connector_name)
+            if not positions and dropped and strict:
+                raise PositionBookError(
+                    "Positions came back for a different connector, "
+                    "so the order was not sent."
+                )
 
         return positions
 

@@ -42,7 +42,7 @@ export interface StopKeepCopy {
 const NON_LP: StopKeepCopy = {
   label: "Keep position open",
   checked: "The executor stops but the position stays open on the exchange.",
-  unchecked: "The executor stops and closes any open position.",
+  unchecked: "The executor stops and sells only the base this executor filled, reduce-only.",
 };
 
 const LP: StopKeepCopy = {

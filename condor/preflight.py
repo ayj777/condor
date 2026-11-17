@@ -180,7 +180,9 @@ class Requirements:
 
     @property
     def is_perp(self) -> bool:
-        return "perpetual" in self.connector.lower()
+        from condor.venue_capabilities import is_perpetual_connector
+
+        return is_perpetual_connector(self.connector)
 
 
 def _quote_of(pair: str) -> str:

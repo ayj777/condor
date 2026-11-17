@@ -9,6 +9,7 @@ import {
 import { api, type ExecutorInfo } from "@/lib/api";
 import { computeMultiOverlays } from "@/lib/executor-overlays";
 import { executorsQuery } from "@/lib/queryClient";
+import { rowsForPane } from "@/lib/trade-guards";
 
 /** The pool an executor traded in, from wherever it records one. */
 function executorPool(ex: ExecutorInfo): string {
@@ -141,7 +142,7 @@ export function useMainControllerData(
   const overlays = useMemo(() => computeMultiOverlays(executors), [executors]);
 
   // Fetch consolidated positions
-  const { data: positionsData, isLoading: isLoadingPositions } = useQuery({
+  const { data: positionsData, isLoading: isLoadingPositions, isError: isPositionsError } = useQuery({
     queryKey: ["consolidated-positions", server],
     queryFn: () => api.getConsolidatedPositions(server!),
     enabled: !!server,
@@ -172,26 +173,26 @@ export function useMainControllerData(
 
   const positions = useMemo(() => {
     if (!positionsData) return [];
-    const all = [
-      ...(positionsData.executor_positions ?? []),
-      ...(positionsData.bot_positions ?? []),
-    ];
+    const all = rowsForPane(
+      [
+        ...(positionsData.executor_positions ?? []),
+        ...(positionsData.bot_positions ?? []),
+      ],
+      positionsData.venue_positions ?? [],
+    );
     // A position is named however its executor is, and an executor found by pool
     // may spell the market a third way neither `pair` nor `altPair` predicted --
     // so the spellings that actually turned up count as this market too.
-    const pairs = new Set([
-      pair,
-      ...(wantsAlt ? [altPair] : []),
-      ...executors.map((ex) => ex.trading_pair).filter(Boolean),
-    ]);
+    // MEXC's own symbol is AIOT_USDT; the page's pair is AIOT-USDT.
+    const pairs = new Set(
+      [
+        pair,
+        ...(wantsAlt ? [altPair] : []),
+        ...executors.map((ex) => ex.trading_pair).filter(Boolean),
+      ].map((p) => marketPairKey(p)),
+    );
     return all
-      .filter(
-        (p) =>
-          // Show positions from main controller or untagged (executor-level positions)
-          (!p.controller_id || p.controller_id === "main") &&
-          p.connector_name === connector &&
-          pairs.has(p.trading_pair),
-      )
+      .filter((p) => positionOnMarket(p, connector, pairs))
       .map((p) => {
         // On a DEX pool page the connector is the *network*, so connector+pair
         // alone puts one SOL-USDC hold on every Solana SOL-USDC pool -- Orca's
@@ -220,5 +221,35 @@ export function useMainControllerData(
     executorPools,
   ]);
 
-  return { executors, overlays, positions, isLoadingPositions };
+  return { executors, overlays, positions, isLoadingPositions, isPositionsError };
+}
+
+/** `AIOT_USDT` and `AIOT-USDT` are the same market. */
+export function marketPairKey(pair: string): string {
+  return (pair || "").replaceAll("_", "-").toUpperCase();
+}
+
+/**
+ * Whether a consolidated row belongs on the trade page for this connector and pair.
+ *
+ * An exchange position (`source: "venue"`) has no controller. Filtering those
+ * out unless `controller_id` is empty or `main` dropped a MEXC long the moment
+ * the row carried any other tag. Connector and pair are compared loosely:
+ * `mexc_perpetual` / `MEXC_PERPETUAL`, and `AIOT-USDT` / `AIOT_USDT`.
+ */
+export function positionOnMarket(
+  position: {
+    connector_name?: string;
+    trading_pair?: string;
+    controller_id?: string;
+    source?: string;
+  },
+  connector: string,
+  pairs: ReadonlySet<string>,
+): boolean {
+  const connectorName = (position.connector_name || "").toLowerCase();
+  if (!connector || connectorName !== connector.toLowerCase()) return false;
+  if (!pairs.has(marketPairKey(position.trading_pair || ""))) return false;
+  if (position.source === "venue") return true;
+  return !position.controller_id || position.controller_id === "main";
 }

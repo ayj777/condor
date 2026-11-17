@@ -14,6 +14,10 @@ import {
 } from "./fields";
 import type { ExecutorValidation } from "./types";
 import { usesLimitPrice, type OrderAction, type OrderState } from "./order-config";
+import { RangeIcebergFields } from "./RangeIcebergFields";
+import { floorBaseAmount, formatTokenAmount, legalBaseAmount, orderStep, percentBase, quoteTogglePrice, roundDownNote, type SizeRule } from "@/lib/order-size";
+import { fallbackStrategy } from "@/lib/order-strategy";
+import { bookForOrder, isHedge, isLongSide, orderCap, positionModeLabel, reducesOpen, resultingSize, sideOptions, type HedgeBooks, type OpenBook } from "@/lib/trade-guards";
 
 // ── Execution strategy options ──
 
@@ -22,6 +26,7 @@ const STRATEGY_OPTIONS = [
   { value: "LIMIT", label: "Limit" },
   { value: "LIMIT_MAKER", label: "Limit Maker" },
   { value: "LIMIT_CHASER", label: "Limit Chaser" },
+  { value: "RANGE_ICEBERG", label: "Range Iceberg" },
 ];
 
 const POSITION_ACTION_OPTIONS = [
@@ -43,6 +48,30 @@ interface Props {
    * book, so a DEX passes `["MARKET"]`. Defaults to all of them.
    */
   strategies?: string[];
+  /** Margin modes this venue can apply. Empty hides the control. */
+  marginModes?: string[];
+  /** The pair's minimum size and step. Null until trading rules arrive. */
+  sizeRule?: SizeRule | null;
+  connector?: string;
+  /** Hide the strategy dropdown. The Iceberg tab is that strategy. */
+  lockStrategy?: boolean;
+  /** Leverage of an open position on this pair, so the form can say it is matching it. */
+  positionLeverage?: number | null;
+  /** Account position mode, ONEWAY or HEDGE. Empty until the read returns. */
+  positionMode?: string;
+  /** The open book, used to label a one-way sell and to show the size after this order. */
+  openBook?: OpenBook | null;
+  /** Long and short books. Hedge open and close each use their own side. */
+  books?: HedgeBooks;
+  /** Sets leverage on its own. Create does not call this. */
+  onApplyLeverage?: () => void;
+  /** False while the position book is still loading, so Apply cannot use a stale draft. */
+  positionsLoaded?: boolean;
+  /** True when the position query failed. Apply stays off so it cannot move an unread book. */
+  positionsFailed?: boolean;
+  applyingLeverage?: boolean;
+  /** True for the frame after a forced strategy change, so Create stays disabled. */
+  onStrategyHold?: (held: boolean) => void;
   /** Wallet balance behind the percentage presets; `null` when it is unknown. */
   baseAvailable?: number | null;
   quoteAvailable?: number | null;
@@ -62,25 +91,50 @@ export function OrderConfigPanel({
   isSpot = false,
   pair,
   strategies,
+  marginModes = [],
+  sizeRule = null,
+  connector = "",
+  lockStrategy = false,
+  positionLeverage = null,
+  positionMode = "",
+  openBook = null,
+  books = { long: null, short: null },
+  onApplyLeverage,
+  applyingLeverage = false,
+  positionsLoaded = false,
+  positionsFailed = false,
+  onStrategyHold,
   baseAvailable = null,
   quoteAvailable = null,
   baseSymbol,
   quoteSymbol,
 }: Props) {
-  const displayBase = baseSymbol || pair?.split("-")[0] || "base";
-  const displayQuote = quoteSymbol || pair?.split("-")[1] || "quote";
+  const displayBase = baseSymbol || pair?.split("-")[0] || "";
+  const displayQuote = quoteSymbol || pair?.split("-")[1] || "";
   const options = strategies
     ? STRATEGY_OPTIONS.filter((o) => strategies.includes(o.value))
     : STRATEGY_OPTIONS;
 
-  // A strategy carried over from another venue (LIMIT on binance → solana) has to
-  // fall back, or the panel would submit a strategy the venue cannot honor.
+  // A strategy the pair does not list falls back to LIMIT, never to MARKET.
+  // A resting order is not rewritten into a market order.
   const allowed = options.some((o) => o.value === state.execution_strategy);
+  const allowedNames = options.map((o) => o.value).join("|");
   useEffect(() => {
-    if (!allowed) {
-      dispatch({ type: "SET_FIELD", field: "execution_strategy", value: "MARKET" });
+    if (lockStrategy) {
+      if (state.execution_strategy !== "RANGE_ICEBERG") {
+        dispatch({ type: "SET_FIELD", field: "execution_strategy", value: "RANGE_ICEBERG" });
+      }
+      return;
     }
-  }, [allowed]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (allowed) return;
+    const next = fallbackStrategy(
+      state.execution_strategy,
+      allowedNames ? allowedNames.split("|") : [],
+    );
+    if (!next || next === state.execution_strategy) return;
+    onStrategyHold?.(true);
+    dispatch({ type: "SET_FIELD", field: "execution_strategy", value: next });
+  }, [allowed, allowedNames, lockStrategy, state.execution_strategy, dispatch, onStrategyHold]);
 
   // Anchor the order price on this market once, so a limit order opens with its
   // line already on the chart and ready to be dragged rather than at 0.
@@ -92,6 +146,7 @@ export function OrderConfigPanel({
 
   const needsPrice = allowed && usesLimitPrice(state.execution_strategy);
   const isChaser = allowed && state.execution_strategy === "LIMIT_CHASER";
+  const isRange = lockStrategy || (allowed && state.execution_strategy === "RANGE_ICEBERG");
 
   // The amount is always in base units, but which balance funds it is not: a spot
   // BUY spends quote and has to be divided by the price to become base, a spot
@@ -106,31 +161,93 @@ export function OrderConfigPanel({
   const pickPercent = (pct: number) => {
     if (spendable === null || spendable <= 0) return;
     const spend = spendable * pct;
-    const amount = spendsBase
-      ? spend
-      : (spend * (isSpot ? 1 : state.leverage)) / (sizingPrice as number);
-    dispatch({ type: "SET_FIELD", field: "amount", value: Number(amount.toPrecision(8)) });
+    const usedLeverage =
+      !isSpot && positionLeverage != null && positionLeverage >= 1
+        ? positionLeverage
+        : state.leverage;
+    const stepped = spendsBase
+      ? (sizeRule ? floorBaseAmount(spend, sizeRule.increment) : spend)
+      : percentBase(spendable, pct, sizingPrice as number, isSpot ? 1 : usedLeverage, sizeRule?.increment ?? 0);
+    dispatch({ type: "SET_FIELD", field: "amount", value: Number(stepped.toPrecision(8)) });
   };
+  const snapped = sizeRule ? legalBaseAmount(state.amount, sizeRule) : state.amount;
+  const rounded = roundDownNote(state.amount, snapped, displayBase);
+  const hedge = isHedge(positionMode);
+  const sizeBook = bookForOrder(positionMode, books, openBook, state.side);
+  const belowMin =
+    !!sizeRule &&
+    sizeRule.minOrderSize > 0 &&
+    state.amount > 0 &&
+    snapped < sizeRule.minOrderSize;
 
   return (
     <div className="flex flex-col gap-4 overflow-y-auto p-3">
       {/* Direction — Buy/Sell on spot: Long/Short would suggest a perp, and a
           "short" without tokens to sell is not a thing a swap can do. */}
-      <SideSelector side={state.side} dispatch={dispatch} isSpot={isSpot} />
+      {positionModeLabel(positionMode) && (
+        <p className="text-[10px] text-[var(--color-text-muted)]">
+          Position mode: {positionModeLabel(positionMode)}
+        </p>
+      )}
+      <SideSelector
+        side={state.side}
+        dispatch={dispatch}
+        isSpot={isSpot}
+        longLabel={sideOptions(positionMode, openBook, state.position_action)[0]?.label}
+        shortLabel={sideOptions(positionMode, openBook, state.position_action)[1]?.label}
+      />
 
       {/* Order Config */}
       <div className="space-y-2.5">
         <SectionHeader>Order</SectionHeader>
+        {!isRange && (
         <div>
           <AmountField
             value={state.amount}
             field="amount"
             dispatch={dispatch}
-            currentPrice={currentPrice}
-            step={0.001}
+            currentPrice={quoteTogglePrice(state.price, currentPrice, usesLimitPrice(state.execution_strategy))}
+            step={sizeRule && sizeRule.increment > 0 ? sizeRule.increment : 0.001}
             baseSymbol={displayBase}
             quoteSymbol={displayQuote}
           />
+          {usesLimitPrice(state.execution_strategy) && state.price > 0 && (
+            <p className="mt-1 text-[10px] text-[var(--color-text-muted)]">
+              A quote amount uses this limit price, so the quote you type is the quote the order spends.
+            </p>
+          )}
+          {sizeRule && sizeRule.minOrderSize > 0 && (
+            <p className="mt-1 text-[10px] text-[var(--color-text-muted)]">
+              Step {formatTokenAmount(orderStep(sizeRule) || sizeRule.minOrderSize)}{displayBase ? ` ${displayBase}` : ""}. Minimum {formatTokenAmount(sizeRule.minOrderSize)}.
+            </p>
+          )}
+          {rounded && (
+            <p className="mt-1 text-[10px] text-[var(--color-text-muted)]">{rounded}</p>
+          )}
+          {snapped > 0 && (sizeBook?.amount || (hedge && state.position_action !== "CLOSE")) ? (
+            <p className="mt-1 text-[10px] text-[var(--color-text-muted)]">
+              After this order the {hedge ? (isLongSide(state.side) ? "long" : "short") : "position"} is {resultingSize(
+                sizeBook?.amount ?? 0,
+                snapped,
+                hedge ? state.position_action === "CLOSE" : state.position_action === "CLOSE" || reducesOpen(state.side, openBook, positionMode),
+              )} {displayBase}.
+            </p>
+          ) : null}
+          {belowMin && (
+            <button
+              type="button"
+              onClick={() =>
+                dispatch({
+                  type: "SET_FIELD",
+                  field: "amount",
+                  value: sizeRule!.minOrderSize,
+                })
+              }
+              className="mt-1 text-[10px] text-[var(--color-primary)] hover:underline"
+            >
+              Use minimum ({sizeRule!.minOrderSize} {displayBase})
+            </button>
+          )}
           <PercentPresets
             available={canSize ? spendable : null}
             symbol={spendSymbol}
@@ -138,6 +255,8 @@ export function OrderConfigPanel({
             label={`Available ${spendSymbol} to spend`}
           />
         </div>
+        )}
+        {!lockStrategy && (
         <SelectField
           label="Execution Strategy"
           value={state.execution_strategy}
@@ -147,7 +266,46 @@ export function OrderConfigPanel({
           // A DEX only swaps at market; a one-option dropdown reads as broken.
           disabled={options.length <= 1}
         />
+        )}
         <LeverageField value={state.leverage} field="leverage" dispatch={dispatch} isSpot={isSpot} />
+        {!isSpot && (
+          <div className="flex items-center justify-between gap-2">
+            <p className="text-[10px] text-[var(--color-text-muted)]">
+              {positionLeverage != null && positionLeverage >= 1
+                ? `Orders keep the open ${positionLeverage}x. Apply leverage to change it.`
+                : "Apply leverage to set it. Placing an order does not."}
+            </p>
+            <button
+              type="button"
+              onClick={() => onApplyLeverage?.()}
+              disabled={
+                !onApplyLeverage ||
+                applyingLeverage ||
+                !positionsLoaded ||
+                positionsFailed ||
+                !(state.leverage >= 1) ||
+                !state.leverageTouched ||
+                (openBook != null && openBook.leverage == null) ||
+                (positionLeverage != null && state.leverage === positionLeverage)
+              }
+              className="shrink-0 rounded border border-[var(--color-border)] px-2 py-1 text-[10px] text-[var(--color-text)] hover:bg-[var(--color-surface-hover)] disabled:opacity-50"
+            >
+              {applyingLeverage ? "Applying" : "Apply leverage"}
+            </button>
+          </div>
+        )}
+        {!isSpot && marginModes.length > 0 && (
+          <SelectField
+            label="Margin mode"
+            value={state.ri_margin_mode}
+            field="ri_margin_mode"
+            dispatch={dispatch}
+            options={marginModes.map((mode) => ({
+              value: mode,
+              label: mode === "ISOLATED" ? "Isolated" : mode === "CROSS" ? "Cross" : mode,
+            }))}
+          />
+        )}
         {!isSpot && (
           <SelectField
             label="Position Action"
@@ -158,6 +316,18 @@ export function OrderConfigPanel({
           />
         )}
       </div>
+
+      {isRange && (
+        <RangeIcebergFields
+          state={state}
+          dispatch={dispatch}
+          connector={connector}
+          sizeRule={sizeRule ?? null}
+          baseSymbol={displayBase}
+          quoteSymbol={displayQuote}
+          maxBase={orderCap(positionMode, books, openBook ?? null, state.position_action, state.side)}
+        />
+      )}
 
       {/* Price (for LIMIT strategies) */}
       {needsPrice && (

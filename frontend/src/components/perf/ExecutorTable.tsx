@@ -12,6 +12,7 @@ import { useNavigate } from "react-router-dom";
 
 import { ExecutorChart } from "@/components/charts/ExecutorChart";
 import { PairLabel } from "@/components/executor/PairLabel";
+import { ExecutorHoverRow } from "@/components/trade/ExecutorDetailPopup";
 import { useResizeDrag } from "@/hooks/useResizeDrag";
 import { type ExecutorInfo } from "@/lib/api";
 import {
@@ -154,7 +155,8 @@ const ExecutorRow = memo(function ExecutorRow({
   const pnlBorder = ex.pnl >= 0 ? "var(--color-green)" : "var(--color-red)";
   const quote = ex.trading_pair?.split("-")[1] || "USDT";
   return (
-    <tr
+    <ExecutorHoverRow
+      executor={ex}
       className={`border-b border-[var(--color-border)]/30 hover:bg-[var(--color-surface-hover)]/50 cursor-pointer transition-colors ${isSelected ? "bg-[var(--color-surface-hover)]/70" : ""}`}
       style={{ borderLeft: `3px solid ${pnlBorder}` }}
       onClick={() => onRowClick(ex)}
@@ -232,7 +234,7 @@ const ExecutorRow = memo(function ExecutorRow({
           </button>
         )}
       </td>
-    </tr>
+    </ExecutorHoverRow>
   );
 });
 

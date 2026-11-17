@@ -12,6 +12,7 @@ import {
 import { useMemo, useState } from "react";
 
 import { ReportFrame } from "@/components/routines/ReportFrame";
+import { ExecutorHoverRow } from "@/components/trade/ExecutorDetailPopup";
 import { useArchivedReport } from "@/hooks/useArchivedReport";
 import { CURRENCY_SYMBOLS, type DisplayCurrency } from "@/hooks/useDisplayCurrency";
 import { useServer } from "@/hooks/useServer";
@@ -215,8 +216,9 @@ function ExecutorTable({
                 const sideColor =
                   ex.side === "BUY" ? "text-[var(--color-green)]" : ex.side === "SELL" ? "text-[var(--color-red)]" : "";
                 return (
-                  <tr
+                  <ExecutorHoverRow
                     key={`${ex.id}-${i}`}
+                    executor={ex}
                     className="border-b border-[var(--color-border)]/50 hover:bg-[var(--color-surface-hover)]"
                   >
                     <td className="px-3 py-1.5 font-mono">{ex.id.slice(0, 8)}</td>
@@ -239,7 +241,7 @@ function ExecutorTable({
                     <td className="px-3 py-1.5 text-right font-mono">
                       {formatCurrencyVolume(ex.volume * ex.usd_rate, symbol)}
                     </td>
-                  </tr>
+                  </ExecutorHoverRow>
                 );
               })}
             </tbody>

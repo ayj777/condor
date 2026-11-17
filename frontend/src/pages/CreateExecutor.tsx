@@ -10,6 +10,7 @@ import {
   Grid3X3,
   Layers,
   Loader2,
+  Rows3,
   Rocket,
   Settings2,
   TrendingUp,
@@ -40,6 +41,7 @@ import { LP_SIDE_RANGE, useLpConfig } from "@/components/executor/lp-config";
 import { useGridConfig } from "@/components/executor/grid-config";
 import { HintBubble } from "@/components/ui/HintBubble";
 import { useOneTimeHint } from "@/hooks/useOneTimeHint";
+import { ExecutorTypeSelect } from "@/components/trade/ExecutorTypeSelect";
 import { TradeBottomPane } from "@/components/trade/TradeBottomPane";
 import { ViewOnlyOverlay } from "@/components/trade/ViewOnlyOverlay";
 import { useLastClose } from "@/hooks/useCandleStore";
@@ -62,12 +64,15 @@ import {
   LOOKBACK_OPTIONS,
 } from "@/lib/gridExecutor";
 import { formatConnectorName, formatPriceSig } from "@/lib/formatters";
+import { baseAmountError, legalBaseAmount } from "@/lib/order-size";
+import { applyHedge, applyReducing, canonicalPositionMode, claimInflight, ICEBERG_MARGIN_HOLD, icebergCreateHeld, isHedge, marginForOpen, MARGIN_CHOOSE, orderCap, ordersBlockCreate, positionModeBlocksCreate, sideHasOpenPosition, type HedgeBooks, type OpenBook } from "@/lib/trade-guards";
 import { useViewFacts } from "@/lib/viewFacts";
 
 // ── Type tabs config ──
 
 const TYPE_TABS: { value: ExecutorType; label: string; icon: React.ReactNode }[] = [
   { value: "order", label: "Order", icon: <ArrowUpDown className="h-3.5 w-3.5" /> },
+  { value: "iceberg", label: "Iceberg", icon: <Rows3 className="h-3.5 w-3.5" /> },
   { value: "position", label: "Position", icon: <TrendingUp className="h-3.5 w-3.5" /> },
   { value: "grid", label: "Grid", icon: <Grid3X3 className="h-3.5 w-3.5" /> },
   { value: "dca", label: "DCA", icon: <Layers className="h-3.5 w-3.5" /> },
@@ -78,6 +83,7 @@ const TYPE_LABELS: Record<ExecutorType, string> = {
   grid: "Grid Executor",
   position: "Position Executor",
   order: "Order Executor",
+  iceberg: "Range Iceberg",
   dca: "DCA Executor",
   lp: "LP Executor",
 };
@@ -109,7 +115,6 @@ export function CreateExecutor() {
   const gridConfig = useGridConfig();
   const { state: gridState, dispatch: gridDispatch } = gridConfig;
   const positionConfig = usePositionConfig();
-  const orderConfig = useOrderConfig();
   const dcaConfig = useDCAConfig();
 
   // ── Shared market state ──
@@ -149,7 +154,13 @@ export function CreateExecutor() {
     }
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const [successInfo, setSuccessInfo] = useState<{ id: string; type: ExecutorType; connector: string; pair: string } | null>(null);
+  const [successInfo, setSuccessInfo] = useState<{
+    id: string;
+    type: ExecutorType;
+    connector: string;
+    pair: string;
+    notice?: string;
+  } | null>(null);
   const [rightPanel, setRightPanel] = useState<"config" | "depth">("config");
   // Cold start lands on the market list (FEAT-053): with no remembered market
   // there is nothing to come back to, and the alternative is a chart on a pair
@@ -242,10 +253,96 @@ export function CreateExecutor() {
   useCondorWebSocket(wsChannels, server);
 
   // Main controller data (executors + positions filtered by connector/pair)
-  const { executors: mainExecutors, overlays: mainOverlays, positions: mainPositions, isLoadingPositions } =
+  const { executors: mainExecutors, overlays: mainOverlays, positions: mainPositions, isLoadingPositions, isPositionsError } =
     useMainControllerData(server, connector, pair);
 
   const rulesData = useTradingRules(server ?? "", connector, caps.hasTradingRules);
+  const pairRule = useMemo(() => {
+    const rule = rulesData?.rules?.find((r) => r.trading_pair === pair);
+    if (!rule) return null;
+    return {
+      minOrderSize: rule.min_order_size,
+      increment: rule.min_base_amount_increment,
+      priceIncrement: rule.min_price_increment,
+      contractSize: rule.contract_size && rule.contract_size > 0 ? rule.contract_size : undefined,
+      orderTypes: rule.supported_order_types ?? [],
+    };
+  }, [rulesData, pair]);
+  const baseSymbol = pair?.split("-")[0] || "";
+  // After the rule: the amount check and the snapped size both read it, and a
+  // hook above this line would close over a rule from the previous pair.
+  const orderConfig = useOrderConfig(pairRule, baseSymbol);
+  // The Iceberg tab is the range-iceberg strategy. Setting it during render
+  // means the first frame the user can click already submits that executor,
+  // rather than a plain order left over from the Order tab.
+  if (executorType === "iceberg" && orderConfig.state.execution_strategy !== "RANGE_ICEBERG") {
+    orderConfig.dispatch({ type: "SET_FIELD", field: "execution_strategy", value: "RANGE_ICEBERG" });
+  }
+  const hedgeBooks = useMemo((): HedgeBooks => {
+    const asBook = (row: (typeof mainPositions)[number]): OpenBook => {
+      const name = (row.position_side || "").toUpperCase();
+      const side = name === "SHORT" || name === "SELL" ? "SHORT" : name === "LONG" || name === "BUY" ? "LONG" : "";
+      return {
+        amount: Math.abs(row.amount),
+        side,
+        leverage: row.leverage != null && row.leverage >= 1 ? row.leverage : null,
+        marginMode: row.margin_mode ?? null,
+      };
+    };
+    const live = mainPositions.filter((p) => Math.abs(p.amount) > 0);
+    const pick = (want: "LONG" | "SHORT") => {
+      const rows = live.filter((row) => asBook(row).side === want);
+      const row = rows.find((item) => item.source === "venue") ?? rows[0];
+      return row ? asBook(row) : null;
+    };
+    return { long: pick("LONG"), short: pick("SHORT") };
+  }, [mainPositions]);
+  const openBook = hedgeBooks.long ?? hedgeBooks.short;
+  const openLeverage = openBook?.leverage ?? null;
+  const leverageSeeded = useRef("");
+  // During render, so the first click already has the open leverage and Apply
+  // cannot send the persisted draft on the frame before an effect runs.
+  if (connector && pair && openLeverage != null) {
+    const key = `${connector}|${(pair || "").replaceAll("_", "-").toUpperCase()}|${openLeverage}`;
+    if (leverageSeeded.current !== key) {
+      leverageSeeded.current = key;
+      if (orderConfig.state.leverage !== openLeverage) {
+        orderConfig.dispatch({ type: "ADOPT_LEVERAGE", value: openLeverage });
+      }
+      if (positionConfig.state.leverage !== openLeverage) {
+        positionConfig.dispatch({ type: "ADOPT_LEVERAGE", value: openLeverage });
+      }
+    }
+  }
+  const [strategyHold, setStrategyHold] = useState(false);
+  useEffect(() => {
+    if (!strategyHold) return;
+    const frame = requestAnimationFrame(() => setStrategyHold(false));
+    return () => cancelAnimationFrame(frame);
+  }, [strategyHold, orderConfig.state.execution_strategy]);
+  const positionModeQuery = useQuery({
+    queryKey: ["position-mode", server, connector],
+    queryFn: () => api.getPositionMode(server!, connector),
+    enabled: !!server && !!connector && !isSpot,
+    retry: false,
+  });
+  const ordersHealth = useQuery({
+    queryKey: ["active-orders", server, connector, pair],
+    queryFn: () => api.getActiveOrders(server!, connector, pair),
+    enabled: !!server && !!connector && !!pair && caps.hasOrderBook,
+    retry: false,
+  });
+
+  const orderStrategies = useMemo(() => {
+    const listed = pairRule?.orderTypes ?? [];
+    if (!listed.length) return caps.orderStrategies;
+    return caps.orderStrategies.filter((strategy) => {
+      if (strategy === "RANGE_ICEBERG") return true;
+      // A chaser posts limits. It is offered only when the pair accepts them.
+      if (strategy === "LIMIT_CHASER") return listed.includes("LIMIT");
+      return listed.includes(strategy);
+    });
+  }, [caps.orderStrategies, pairRule]);
 
   // Load candles for an executor that's outside the current range
   const handleRequestCandleRange = useCallback((startTime: number) => {
@@ -409,14 +506,28 @@ export function CreateExecutor() {
 
   // ── Active config derived values ──
   const activeValidation = useMemo(() => {
-    switch (executorType) {
-      case "grid": return gridConfig.validation;
-      case "position": return positionConfig.validation;
-      case "order": return orderConfig.validation;
-      case "dca": return dcaConfig.validation;
-      case "lp": return lpConfig.validation;
-    }
-  }, [executorType, gridConfig.validation, positionConfig.validation, orderConfig.validation, dcaConfig.validation, lpConfig.validation]);
+    const base = (() => {
+      switch (executorType) {
+        case "grid": return gridConfig.validation;
+        case "position": return positionConfig.validation;
+        case "order":
+        case "iceberg":
+          return orderConfig.validation;
+        case "dca": return dcaConfig.validation;
+        case "lp": return lpConfig.validation;
+      }
+    })();
+    // The order hook already applies the pair's step. Position amounts are
+    // base too, and a 0.001 remembered from another venue must not enable a
+    // MEXC create that the exchange will reject.
+    if (executorType !== "position" || !pairRule) return base;
+    const message = baseAmountError(positionConfig.state.amount, pairRule, baseSymbol);
+    if (!message || message.startsWith("Amount required")) return base;
+    return {
+      valid: false,
+      errors: [message, ...base.errors.filter((e) => !e.startsWith("Amount"))],
+    };
+  }, [executorType, gridConfig.validation, positionConfig.validation, positionConfig.state.amount, orderConfig.validation, dcaConfig.validation, lpConfig.validation, pairRule, baseSymbol]);
 
   // What the form currently says, for the chat bubble (FEAT-060/FEAT-072).
   //
@@ -452,16 +563,39 @@ export function CreateExecutor() {
               leverage: lev(positionConfig.state.leverage),
             }
           : executorType === "order"
-            ? {
-                side: side(orderConfig.state.side),
-                "order type": orderConfig.state.execution_strategy,
-                amount: orderConfig.state.amount,
-                price:
-                  orderConfig.state.execution_strategy === "MARKET"
-                    ? undefined
-                    : formatPriceSig(orderConfig.state.price),
-                leverage: lev(orderConfig.state.leverage),
-              }
+            ? orderConfig.state.execution_strategy === "RANGE_ICEBERG"
+              ? {
+                  side: side(orderConfig.state.side),
+                  "order type": "Range iceberg",
+                  mode: orderConfig.state.ri_mode,
+                  amount: orderConfig.state.ri_total_amount,
+                  "size unit": orderConfig.state.ri_size_unit,
+                  leverage: lev(orderConfig.state.leverage),
+                  margin: isSpot ? undefined : orderConfig.state.ri_margin_mode,
+                }
+              : {
+                  side: side(orderConfig.state.side),
+                  "order type": orderConfig.state.execution_strategy,
+                  amount: orderConfig.state.amount,
+                  price:
+                    orderConfig.state.execution_strategy === "MARKET"
+                      ? undefined
+                      : formatPriceSig(orderConfig.state.price),
+                  leverage: lev(orderConfig.state.leverage),
+                  margin: caps.marginModes.length && !isSpot
+                    ? orderConfig.state.ri_margin_mode
+                    : undefined,
+                }
+            : executorType === "iceberg"
+              ? {
+                  side: side(orderConfig.state.side),
+                  "order type": "Range iceberg",
+                  mode: orderConfig.state.ri_mode,
+                  amount: orderConfig.state.ri_total_amount,
+                  "size unit": orderConfig.state.ri_size_unit,
+                  leverage: lev(orderConfig.state.leverage),
+                  margin: isSpot ? undefined : orderConfig.state.ri_margin_mode,
+                }
             : executorType === "dca"
               ? {
                   side: side(dcaConfig.state.side),
@@ -501,6 +635,7 @@ export function CreateExecutor() {
       case "grid": return gridConfig.chartProps;
       case "position": return positionConfig.chartProps;
       case "order": return orderConfig.chartProps;
+      case "iceberg": return orderConfig.chartProps;
       case "dca": return dcaConfig.chartProps;
       case "lp": return lpConfig.chartProps;
     }
@@ -533,6 +668,7 @@ export function CreateExecutor() {
           targets.positionConfig.handleChartPriceSet(field, price);
           break;
         case "order":
+        case "iceberg":
           targets.orderConfig.handleChartPriceSet(field, price);
           break;
         case "dca":
@@ -546,6 +682,28 @@ export function CreateExecutor() {
     [executorType],
   );
 
+  const createLock = useRef(false);
+  const leverageMutation = useMutation({
+    mutationFn: () => {
+      if (!server) throw new Error("No server");
+      if (isPositionsError) throw new Error("Cannot read open positions, so leverage was not changed.");
+      if (isLoadingPositions) throw new Error("Wait until the open position is loaded");
+      if (openBook && openBook.leverage == null) {
+        throw new Error("Cannot read the open leverage, so it was not changed.");
+      }
+      if (openLeverage != null && orderConfig.state.leverage === openLeverage) {
+        throw new Error("That is already the open leverage.");
+      }
+      if (!(orderConfig.state.leverage >= 1)) throw new Error("Leverage must be at least 1");
+      return api.setAccountLeverage(server, {
+        leverage: orderConfig.state.leverage,
+        connector_name: connector,
+        trading_pair: pair,
+        side: orderConfig.state.side,
+      });
+    },
+  });
+
   // Create mutation
   const createMutation = useMutation({
     mutationFn: () => {
@@ -555,18 +713,63 @@ export function CreateExecutor() {
       // one stray caller away from posting a create it knows the venue will
       // reject for want of credentials.
       if (!caps.canTrade) throw new Error(`No API keys for ${connector}`);
+      if (icebergCreateHeld(caps.rangeIcebergOmitsMargin, executorType, orderConfig.state.execution_strategy)) {
+        throw new Error(ICEBERG_MARGIN_HOLD);
+      }
+      if (positionModeBlocksCreate(isSpot, executorType, positionModeQuery.isSuccess)) {
+        throw new Error("Position mode has not been read, so the order was not sent.");
+      }
 
       let payload: { executor_type: string; config: Record<string, unknown> };
 
+      const mode = canonicalPositionMode(positionModeQuery.data?.position_mode ?? "");
+      const positionsKnown = !isLoadingPositions && !isPositionsError;
+      const book = {
+        positionsKnown,
+        sideHasPosition: sideHasOpenPosition(mode, hedgeBooks, openBook, orderConfig.state.side),
+      };
+      const cap = orderCap(
+        mode,
+        hedgeBooks,
+        openBook,
+        orderConfig.state.position_action,
+        orderConfig.state.side,
+      );
       switch (executorType) {
         case "grid":
           payload = gridConfig.buildPayload(connector, pair, isSpot);
           break;
-        case "position":
+        case "position": {
           payload = positionConfig.buildPayload(connector, pair, isSpot);
+          payload.config.amount = legalBaseAmount(
+            Number(payload.config.amount) || 0,
+            pairRule,
+          );
+          const margin = marginForOpen({
+            isSpot,
+            opening: true,
+            explicit: false,
+            displayed: "ISOLATED",
+            positionsKnown,
+            sideHasPosition: sideHasOpenPosition(
+              mode,
+              hedgeBooks,
+              openBook,
+              positionConfig.state.side,
+            ),
+          });
+          if ("block" in margin) throw new Error(margin.block);
+          if (margin.send) {
+            payload.config.margin_mode = margin.mode;
+            payload.config.margin_explicit = true;
+          }
           break;
+        }
         case "order":
-          payload = orderConfig.buildPayload(connector, pair, isSpot);
+          payload = orderConfig.buildPayload(connector, pair, isSpot, false, cap, book);
+          break;
+        case "iceberg":
+          payload = orderConfig.buildPayload(connector, pair, isSpot, true, cap, book);
           break;
         case "dca":
           payload = dcaConfig.buildPayload(connector, pair, isSpot);
@@ -577,6 +780,22 @@ export function CreateExecutor() {
           break;
       }
 
+      if (executorType === "order" || executorType === "iceberg") {
+        const closeError = isHedge(mode)
+          ? applyHedge(
+              payload.config,
+              hedgeBooks,
+              orderConfig.state.position_action,
+              orderConfig.state.side,
+            )
+          : applyReducing(
+              payload.config,
+              openBook,
+              orderConfig.state.position_action,
+              mode,
+            );
+        if (closeError) throw new Error(closeError);
+      }
       return api.createExecutor(server, payload);
     },
     onSuccess: (data) => {
@@ -585,11 +804,16 @@ export function CreateExecutor() {
         case "grid": gridConfig.save(); break;
         case "position": positionConfig.save(); break;
         case "order": orderConfig.save(); break;
+        case "iceberg": orderConfig.save(); break;
         case "dca": dcaConfig.save(); break;
         case "lp": lpConfig.save(); break;
       }
       // Show success modal
-      setSuccessInfo({ id: data.executor_id, type: executorType, connector, pair });
+      const notice =
+        data.margin_mode_applied === false
+          ? "The requested margin mode was not applied. The order uses the connector's current margin mode."
+          : undefined;
+      setSuccessInfo({ id: data.executor_id, type: executorType, connector, pair, notice });
       // Invalidate executor queries so the new one appears immediately
       queryClient.invalidateQueries({
         queryKey: executorsQuery(server, { controllerId: "main", pair }).queryKey,
@@ -599,6 +823,31 @@ export function CreateExecutor() {
       setSelectedExecutorId(data.executor_id);
     },
   });
+
+  const icebergHeld = icebergCreateHeld(
+    caps.rangeIcebergOmitsMargin,
+    executorType,
+    orderConfig.state.execution_strategy,
+  );
+  const modeUnread = positionModeBlocksCreate(isSpot, executorType, positionModeQuery.isSuccess);
+  const shownMode = canonicalPositionMode(positionModeQuery.data?.position_mode ?? "");
+  const marginDecision = marginForOpen({
+    isSpot,
+    opening:
+      executorType === "position" ||
+      ((executorType === "order" || executorType === "iceberg") &&
+        orderConfig.state.position_action !== "CLOSE"),
+    explicit: executorType === "position" ? false : orderConfig.state.marginExplicit,
+    displayed: executorType === "position" ? "ISOLATED" : orderConfig.state.ri_margin_mode,
+    positionsKnown: !isLoadingPositions && !isPositionsError,
+    sideHasPosition: sideHasOpenPosition(
+      shownMode,
+      hedgeBooks,
+      openBook,
+      executorType === "position" ? positionConfig.state.side : orderConfig.state.side,
+    ),
+  });
+  const marginBlocked = "block" in marginDecision;
 
   if (!server) {
     return <NoServerCard message="Select a server from the sidebar to create an executor." />;
@@ -795,6 +1044,7 @@ export function CreateExecutor() {
               connector={connector}
               pair={pair}
               isSpot={isSpot}
+              showOrders={caps.hasOrderBook}
               selectedExecutorId={selectedExecutorId}
               onExecutorSelect={(ex) => {
                 setSelectedExecutorId(ex?.id ?? null);
@@ -854,30 +1104,16 @@ export function CreateExecutor() {
 
           {activePanel === "config" ? (
             <>
-              {/* Type Tabs */}
-              <div className="border-b border-[var(--color-border)]">
-                <div className="flex">
-                  {TYPE_TABS.filter((t) => caps.executorTypes.includes(t.value)).map((tab) => (
-                    <button
-                      key={tab.value}
-                      onClick={() => handleTypeChange(tab.value)}
-                      className={`flex flex-1 items-center justify-center gap-1.5 px-2 py-2.5 text-[11px] font-medium transition-colors ${
-                        executorType === tab.value
-                          ? "border-b-2 border-[var(--color-primary)] text-[var(--color-primary)]"
-                          : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
-                      }`}
-                    >
-                      {tab.icon}
-                      {tab.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
+              <ExecutorTypeSelect
+                options={TYPE_TABS.filter((tab) => caps.executorTypes.includes(tab.value))}
+                value={executorType}
+                onChange={handleTypeChange}
+              />
 
-              {/* Everything the venue's credentials gate — the config form and
-                  the Create button — sits inside this one positioned box, so
+              {/* Everything the venue's credentials gate, the config form and
+                  the Create button, sits inside this one positioned box, so
                   the view-only overlay covers exactly that and nothing else:
-                  the type tabs above it still switch, the Data tab beside it
+                  the type selector above it still switches, the Data tab beside it
                   is untouched, and the panel keeps its scroll/footer split. */}
               <div className="relative flex min-h-0 flex-1 flex-col">
                 {/* Config Panel */}
@@ -886,10 +1122,13 @@ export function CreateExecutor() {
                     <GridConfigPanel state={gridState} dispatch={gridDispatch} currentPrice={currentPrice} isSpot={isSpot} quoteCurrency={pair?.split("-")[1] || "USDT"} />
                   )}
                   {executorType === "position" && (
-                    <PositionConfigPanel state={positionConfig.state} dispatch={positionConfig.dispatch} validation={positionConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} />
+                    <PositionConfigPanel state={positionConfig.state} dispatch={positionConfig.dispatch} validation={positionConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} sizeRule={pairRule} />
                   )}
                   {executorType === "order" && (
-                    <OrderConfigPanel state={orderConfig.state} dispatch={orderConfig.dispatch} validation={orderConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} strategies={caps.orderStrategies} baseAvailable={balances.base} quoteAvailable={balances.quote} />
+                    <OrderConfigPanel state={orderConfig.state} dispatch={orderConfig.dispatch} validation={orderConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} connector={connector} strategies={orderStrategies} marginModes={caps.marginModes} sizeRule={pairRule} positionLeverage={openLeverage} openBook={openBook} positionMode={canonicalPositionMode(positionModeQuery.data?.position_mode ?? "")} onApplyLeverage={() => leverageMutation.mutate()} applyingLeverage={leverageMutation.isPending} positionsLoaded={!isLoadingPositions} positionsFailed={isPositionsError} onStrategyHold={setStrategyHold} baseAvailable={balances.base} quoteAvailable={balances.quote} books={hedgeBooks} />
+                  )}
+                  {executorType === "iceberg" && (
+                    <OrderConfigPanel state={orderConfig.state} dispatch={orderConfig.dispatch} validation={orderConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} connector={connector} strategies={orderStrategies} marginModes={caps.marginModes} sizeRule={pairRule} lockStrategy positionLeverage={openLeverage} openBook={openBook} positionMode={canonicalPositionMode(positionModeQuery.data?.position_mode ?? "")} onApplyLeverage={() => leverageMutation.mutate()} applyingLeverage={leverageMutation.isPending} positionsLoaded={!isLoadingPositions} positionsFailed={isPositionsError} baseAvailable={balances.base} quoteAvailable={balances.quote} books={hedgeBooks} />
                   )}
                   {executorType === "dca" && (
                     <DCAConfigPanel state={dcaConfig.state} dispatch={dcaConfig.dispatch} validation={dcaConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} />
@@ -906,9 +1145,27 @@ export function CreateExecutor() {
                       {activeValidation.errors[0]}
                     </p>
                   )}
+                  {icebergHeld && (
+                    <p className="mb-2 text-[11px] text-[var(--color-red)]">{ICEBERG_MARGIN_HOLD}</p>
+                  )}
+                  {modeUnread && (
+                    <p className="mb-2 text-[11px] text-[var(--color-red)]">
+                      Position mode has not been read, so this order was not sent.
+                    </p>
+                  )}
+                  {marginBlocked && (
+                    <p className="mb-2 text-[11px] text-[var(--color-red)]">{MARGIN_CHOOSE}</p>
+                  )}
                   <button
-                    onClick={() => createMutation.mutate()}
-                    disabled={!caps.canTrade || !activeValidation.valid || createMutation.isPending}
+                    onClick={() => {
+                      if (!claimInflight(createLock)) return;
+                      createMutation.mutate(undefined, {
+                        onSettled: () => {
+                          createLock.current = false;
+                        },
+                      });
+                    }}
+                    disabled={!caps.canTrade || !activeValidation.valid || createMutation.isPending || ordersBlockCreate(executorType, caps.hasOrderBook, ordersHealth.isError) || strategyHold || icebergHeld || modeUnread || marginBlocked || (executorType === "order" && !orderStrategies.includes(orderConfig.state.execution_strategy))}
                     className="flex w-full items-center justify-center gap-2 rounded-lg bg-[var(--color-primary)] px-4 py-2.5 text-sm font-bold text-white transition-colors hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     {createMutation.isPending ? (
@@ -916,7 +1173,9 @@ export function CreateExecutor() {
                     ) : (
                       <Rocket className="h-4 w-4" />
                     )}
-                    Create {TYPE_LABELS[executorType]}
+                    {executorType === "iceberg" || orderConfig.state.execution_strategy === "RANGE_ICEBERG"
+                      ? "Create Range Iceberg"
+                      : `Create ${TYPE_LABELS[executorType]}`}
                   </button>
                 </div>
 
@@ -933,8 +1192,15 @@ export function CreateExecutor() {
       {successInfo && (
         <ExecutorSuccessModal
           executorId={successInfo.id}
-          title={`${TYPE_LABELS[successInfo.type]} Created`}
-          subtitle={`Successfully deployed on ${successInfo.connector}`}
+          title={
+            successInfo.type === "order" && orderConfig.state.execution_strategy === "RANGE_ICEBERG"
+              ? "Range Iceberg Created"
+              : `${TYPE_LABELS[successInfo.type]} Created`
+          }
+          subtitle={
+            successInfo.notice ??
+            `Successfully deployed on ${successInfo.connector}`
+          }
           details={
             <>
               <div className="flex items-center justify-between text-[11px]">
