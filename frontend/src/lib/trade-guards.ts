@@ -33,6 +33,50 @@ export function icebergCreateHeld(
   return iceberg && !omitsMargin;
 }
 
+export const MARGIN_CHOOSE =
+  "Choose a margin mode: no open position on this side";
+
+/**
+ * Whether this order needs a margin mode on the payload.
+ *
+ * A side with no open position must send the mode the form is showing.
+ * Isolated is that default. An open position is left alone unless the user
+ * edited the mode. An unread book blocks the submit.
+ */
+export function marginForOpen(input: {
+  isSpot: boolean;
+  opening: boolean;
+  explicit: boolean;
+  displayed?: string | null;
+  positionsKnown: boolean;
+  sideHasPosition: boolean | null;
+}): { send: false } | { send: true; mode: string } | { block: typeof MARGIN_CHOOSE } {
+  const displayed = String(input.displayed || "ISOLATED").toUpperCase();
+  if (input.isSpot || !input.opening) {
+    if (input.explicit) return { send: true, mode: displayed };
+    return { send: false };
+  }
+  if (input.explicit) return { send: true, mode: displayed };
+  if (!input.positionsKnown || input.sideHasPosition == null) return { block: MARGIN_CHOOSE };
+  if (!input.sideHasPosition) return { send: true, mode: displayed };
+  return { send: false };
+}
+
+/** Hedge looks at the chosen side. One-way looks at the single book. Unknown mode returns null. */
+export function sideHasOpenPosition(
+  mode: string,
+  books: HedgeBooks,
+  fallback: OpenBook | null,
+  side: unknown,
+): boolean | null {
+  if (isHedge(mode)) {
+    const book = isLongSide(side) ? books.long : books.short;
+    return !!book && book.amount > 0;
+  }
+  if (isOneWay(mode)) return !!fallback && fallback.amount > 0;
+  return null;
+}
+
 /** A perp order or iceberg waits until the position-mode read has succeeded. */
 export function positionModeBlocksCreate(
   isSpot: boolean,

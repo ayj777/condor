@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { fallbackStrategy } from "./order-strategy";
 import { icebergSentSize, type RangeIcebergInput } from "./range-iceberg";
 import { quoteTogglePrice } from "./order-size";
-import { applyClose, applyHedge, applyReducing, canonicalPositionMode, claimInflight, defaultKeepPosition, executorBookSide, icebergCreateHeld, isOneWay, orderCap, ordersBlockCreate, positionModeBlocksCreate, positionModeLabel, resultingSize, rowsForPane, sideOptions } from "./trade-guards";
+import { applyClose, applyHedge, applyReducing, canonicalPositionMode, claimInflight, defaultKeepPosition, executorBookSide, icebergCreateHeld, isOneWay, marginForOpen, MARGIN_CHOOSE, orderCap, ordersBlockCreate, positionModeBlocksCreate, positionModeLabel, resultingSize, rowsForPane, sideHasOpenPosition, sideOptions } from "./trade-guards";
 
 const input = (patch: Partial<RangeIcebergInput> = {}): RangeIcebergInput => ({
   side: "BUY",
@@ -214,6 +214,30 @@ describe("review guards", () => {
     expect(ordersBlockCreate("grid", true, true)).toBe(false);
     expect(ordersBlockCreate("lp", true, true)).toBe(false);
     expect(ordersBlockCreate("order", false, true)).toBe(false);
+  });
+
+  it("sends the displayed margin when that side has no position", () => {
+    const flat = {
+      isSpot: false,
+      opening: true,
+      explicit: false,
+      displayed: "ISOLATED",
+      positionsKnown: true,
+      sideHasPosition: false,
+    };
+    expect(marginForOpen(flat)).toEqual({ send: true, mode: "ISOLATED" });
+    expect(marginForOpen({ ...flat, displayed: "CROSS" })).toEqual({ send: true, mode: "CROSS" });
+    expect(marginForOpen({ ...flat, sideHasPosition: true })).toEqual({ send: false });
+    expect(marginForOpen({ ...flat, sideHasPosition: true, explicit: true, displayed: "CROSS" })).toEqual({
+      send: true,
+      mode: "CROSS",
+    });
+    expect(marginForOpen({ ...flat, positionsKnown: false })).toEqual({ block: MARGIN_CHOOSE });
+    expect(marginForOpen({ ...flat, sideHasPosition: null })).toEqual({ block: MARGIN_CHOOSE });
+    expect(marginForOpen({ ...flat, opening: false })).toEqual({ send: false });
+    const long = { amount: 60770, side: "LONG" as const, leverage: 2, marginMode: "ISOLATED" };
+    expect(sideHasOpenPosition("HEDGE", { long, short: null }, long, 1)).toBe(true);
+    expect(sideHasOpenPosition("HEDGE", { long, short: null }, long, 2)).toBe(false);
   });
 
   it("holds a perp order until position mode is read and holds iceberg while margin would default", () => {

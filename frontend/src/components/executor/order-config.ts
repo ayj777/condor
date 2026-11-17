@@ -15,6 +15,7 @@ import {
   validateRangeIceberg,
   type RangeIcebergInput,
 } from "@/lib/range-iceberg";
+import { marginForOpen } from "@/lib/trade-guards";
 
 // ── State ──
 
@@ -28,7 +29,7 @@ export interface OrderState {
   leverageExplicit: boolean;
   /** True after the user types a leverage. Apply stays off until then. */
   leverageTouched: boolean;
-  /** True only after the user edits the margin mode. A default is not sent. */
+  /** True after the user edits the margin mode. A flat side still sends the displayed mode. */
   marginExplicit: boolean;
   chaser_distance: number;
   chaser_refresh_threshold: number;
@@ -106,6 +107,7 @@ export const ORDER_DEFAULTS: OrderState = {
   ri_schedule_interval: "",
   ri_catch_up: "CARRY",
   ri_cap_behavior: "REST_AT_CAP",
+  // Isolated is the mexc_perpetual default, and a flat side sends it.
   ri_margin_mode: "ISOLATED",
   ri_reduce_only: false,
   ri_contracts_confirmed: false,
@@ -378,7 +380,14 @@ export function useOrderConfig(sizeRule: SizeRule | null = null, baseSymbol = "b
     state.ri_limit_price,
   ]);
 
-  const buildPayload = (connector: string, pair: string, isSpot: boolean, asRange = false, maxBase = 0) => {
+  const buildPayload = (
+    connector: string,
+    pair: string,
+    isSpot: boolean,
+    asRange = false,
+    maxBase = 0,
+    book?: { positionsKnown: boolean; sideHasPosition: boolean | null },
+  ) => {
     const tick = sizeRule?.priceIncrement ?? 0;
     if (asRange || isRangeIceberg(state.execution_strategy)) {
       const input = rangeIcebergInput(state);
@@ -398,9 +407,20 @@ export function useOrderConfig(sizeRule: SizeRule | null = null, baseSymbol = "b
         input.sliceAmount = sent.perSlice;
         if (sent.sizeUnit) input.sizeUnit = sent.sizeUnit;
       }
-      const includeMargin = state.marginExplicit && !isSpot;
-      const config = rangeIcebergConfig(input, connector, pair, includeMargin);
-      if (includeMargin) config.margin_explicit = true;
+      const margin = marginForOpen({
+        isSpot,
+        opening: state.position_action !== "CLOSE",
+        explicit: state.marginExplicit,
+        displayed: state.ri_margin_mode,
+        positionsKnown: book?.positionsKnown ?? false,
+        sideHasPosition: book?.sideHasPosition ?? null,
+      });
+      if ("block" in margin) throw new Error(margin.block);
+      const config = rangeIcebergConfig(input, connector, pair, margin.send);
+      if (margin.send) {
+        config.margin_mode = margin.mode;
+        config.margin_explicit = true;
+      }
       return {
         executor_type: "range_iceberg_executor" as const,
         config,
@@ -430,10 +450,19 @@ export function useOrderConfig(sizeRule: SizeRule | null = null, baseSymbol = "b
     if (state.position_action !== "OPEN") {
       config.position_action = state.position_action;
     }
-    // Margin is sent only after the user edits it. The route still drops it
-    // unless that edit differs from the open position.
-    if (!isSpot && state.marginExplicit) {
-      config.margin_mode = state.ri_margin_mode;
+    // A flat side sends the displayed mode, Isolated unless the user changed it.
+    // An open position is omitted until the user edits it.
+    const margin = marginForOpen({
+      isSpot,
+      opening: state.position_action !== "CLOSE",
+      explicit: state.marginExplicit,
+      displayed: state.ri_margin_mode,
+      positionsKnown: book?.positionsKnown ?? false,
+      sideHasPosition: book?.sideHasPosition ?? null,
+    });
+    if ("block" in margin) throw new Error(margin.block);
+    if (margin.send) {
+      config.margin_mode = margin.mode;
       config.margin_explicit = true;
     }
 

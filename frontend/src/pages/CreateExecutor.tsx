@@ -65,7 +65,7 @@ import {
 } from "@/lib/gridExecutor";
 import { formatConnectorName, formatPriceSig } from "@/lib/formatters";
 import { baseAmountError, legalBaseAmount } from "@/lib/order-size";
-import { applyHedge, applyReducing, canonicalPositionMode, claimInflight, ICEBERG_MARGIN_HOLD, icebergCreateHeld, isHedge, orderCap, ordersBlockCreate, positionModeBlocksCreate, type HedgeBooks, type OpenBook } from "@/lib/trade-guards";
+import { applyHedge, applyReducing, canonicalPositionMode, claimInflight, ICEBERG_MARGIN_HOLD, icebergCreateHeld, isHedge, marginForOpen, MARGIN_CHOOSE, orderCap, ordersBlockCreate, positionModeBlocksCreate, sideHasOpenPosition, type HedgeBooks, type OpenBook } from "@/lib/trade-guards";
 import { useViewFacts } from "@/lib/viewFacts";
 
 // ── Type tabs config ──
@@ -723,6 +723,11 @@ export function CreateExecutor() {
       let payload: { executor_type: string; config: Record<string, unknown> };
 
       const mode = canonicalPositionMode(positionModeQuery.data?.position_mode ?? "");
+      const positionsKnown = !isLoadingPositions && !isPositionsError;
+      const book = {
+        positionsKnown,
+        sideHasPosition: sideHasOpenPosition(mode, hedgeBooks, openBook, orderConfig.state.side),
+      };
       const cap = orderCap(
         mode,
         hedgeBooks,
@@ -734,18 +739,37 @@ export function CreateExecutor() {
         case "grid":
           payload = gridConfig.buildPayload(connector, pair, isSpot);
           break;
-        case "position":
+        case "position": {
           payload = positionConfig.buildPayload(connector, pair, isSpot);
           payload.config.amount = legalBaseAmount(
             Number(payload.config.amount) || 0,
             pairRule,
           );
+          const margin = marginForOpen({
+            isSpot,
+            opening: true,
+            explicit: false,
+            displayed: "ISOLATED",
+            positionsKnown,
+            sideHasPosition: sideHasOpenPosition(
+              mode,
+              hedgeBooks,
+              openBook,
+              positionConfig.state.side,
+            ),
+          });
+          if ("block" in margin) throw new Error(margin.block);
+          if (margin.send) {
+            payload.config.margin_mode = margin.mode;
+            payload.config.margin_explicit = true;
+          }
           break;
+        }
         case "order":
-          payload = orderConfig.buildPayload(connector, pair, isSpot, false, cap);
+          payload = orderConfig.buildPayload(connector, pair, isSpot, false, cap, book);
           break;
         case "iceberg":
-          payload = orderConfig.buildPayload(connector, pair, isSpot, true, cap);
+          payload = orderConfig.buildPayload(connector, pair, isSpot, true, cap, book);
           break;
         case "dca":
           payload = dcaConfig.buildPayload(connector, pair, isSpot);
@@ -806,6 +830,24 @@ export function CreateExecutor() {
     orderConfig.state.execution_strategy,
   );
   const modeUnread = positionModeBlocksCreate(isSpot, executorType, positionModeQuery.isSuccess);
+  const shownMode = canonicalPositionMode(positionModeQuery.data?.position_mode ?? "");
+  const marginDecision = marginForOpen({
+    isSpot,
+    opening:
+      executorType === "position" ||
+      ((executorType === "order" || executorType === "iceberg") &&
+        orderConfig.state.position_action !== "CLOSE"),
+    explicit: executorType === "position" ? false : orderConfig.state.marginExplicit,
+    displayed: executorType === "position" ? "ISOLATED" : orderConfig.state.ri_margin_mode,
+    positionsKnown: !isLoadingPositions && !isPositionsError,
+    sideHasPosition: sideHasOpenPosition(
+      shownMode,
+      hedgeBooks,
+      openBook,
+      executorType === "position" ? positionConfig.state.side : orderConfig.state.side,
+    ),
+  });
+  const marginBlocked = "block" in marginDecision;
 
   if (!server) {
     return <NoServerCard message="Select a server from the sidebar to create an executor." />;
@@ -1111,6 +1153,9 @@ export function CreateExecutor() {
                       Position mode has not been read, so this order was not sent.
                     </p>
                   )}
+                  {marginBlocked && (
+                    <p className="mb-2 text-[11px] text-[var(--color-red)]">{MARGIN_CHOOSE}</p>
+                  )}
                   <button
                     onClick={() => {
                       if (!claimInflight(createLock)) return;
@@ -1120,7 +1165,7 @@ export function CreateExecutor() {
                         },
                       });
                     }}
-                    disabled={!caps.canTrade || !activeValidation.valid || createMutation.isPending || ordersBlockCreate(executorType, caps.hasOrderBook, ordersHealth.isError) || strategyHold || icebergHeld || modeUnread || (executorType === "order" && !orderStrategies.includes(orderConfig.state.execution_strategy))}
+                    disabled={!caps.canTrade || !activeValidation.valid || createMutation.isPending || ordersBlockCreate(executorType, caps.hasOrderBook, ordersHealth.isError) || strategyHold || icebergHeld || modeUnread || marginBlocked || (executorType === "order" && !orderStrategies.includes(orderConfig.state.execution_strategy))}
                     className="flex w-full items-center justify-center gap-2 rounded-lg bg-[var(--color-primary)] px-4 py-2.5 text-sm font-bold text-white transition-colors hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     {createMutation.isPending ? (

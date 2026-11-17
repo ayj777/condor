@@ -7,8 +7,11 @@ default of 1x or ISOLATED left in the config is a change to that position.
 
 Create never calls ``set_leverage``. That call is ``confirm_leverage``, and
 only after the user applies a value that is at least 1 and differs from the
-open position. Margin mode is sent only when the user edited it and the new
-value differs. If the open book cannot be read, the create is aborted.
+open position. Margin mode is omitted when that side already has a position
+and the user did not edit it. A side with no position sends the displayed
+mode, and Isolated when the payload left it out, because MEXC needs an
+open type to open the side. If the open book cannot be read, the create is
+aborted.
 """
 
 from __future__ import annotations
@@ -33,9 +36,11 @@ async def apply_venue_account_settings(
 
     Returns ``None`` when this venue does not confirm account settings.
     ``True`` when nothing still needs a margin write, or the write landed.
-    ``False`` when the user asked for a margin change and this API has no
-    margin-mode route. The field is removed in that case so range iceberg
-    cannot apply it either. A leverage below 1, or a book that cannot be
+    ``False`` when the user asked for a margin change on an open position and
+    this API has no margin-mode route. The field is removed in that case so
+    the executor cannot apply it to the open position. A new side keeps the
+    mode in the config even when that route is missing. A leverage below 1,
+    or a book that cannot be
     read, raises :class:`AccountSettingsError` and the caller does not create.
     """
     connector = str(config.get("connector_name") or "")
@@ -69,7 +74,7 @@ async def apply_venue_account_settings(
         config.pop("margin_mode", None)
         return True
 
-    return await _apply_margin(trading, account, connector, pair, config, matched)
+    return await _apply_margin(trading, account, connector, pair, config, matched, rows)
 
 
 async def confirm_leverage(
@@ -165,13 +170,18 @@ async def _set_leverage(
 def strip_order_only_fields(executor_type: str, config: dict) -> None:
     """Drop flags the executor config model does not declare.
 
-    ``margin_mode`` stays only on a range iceberg, and only when the account
-    write above kept it. Every other executor rejects the extra key.
+    ``margin_mode`` stays on a range iceberg, order, or position when the
+    account step kept it. A new side needs that open type. Every other
+    executor rejects the extra key.
     """
     config.pop("leverage_explicit", None)
     config.pop("leverage_confirmed", None)
     config.pop("margin_explicit", None)
-    if executor_type == "range_iceberg_executor" and config.get("margin_mode"):
+    if executor_type in (
+        "range_iceberg_executor",
+        "order_executor",
+        "position_executor",
+    ) and config.get("margin_mode"):
         return
     config.pop("margin_mode", None)
 
@@ -184,6 +194,30 @@ def _reject_bad_leverage(value: object) -> None:
         raise AccountSettingsError("Leverage must be at least 1.")
 
 
+def _is_opening(config: dict) -> bool:
+    """Close and reduce-only leave an existing book alone."""
+    if config.get("reduce_only") is True:
+        return False
+    action = str(config.get("position_action") or "OPEN")
+    if "." in action:
+        action = action.rsplit(".", 1)[-1]
+    return action.strip().upper() != "CLOSE"
+
+
+def _rows_on_pair(rows: list[dict], pair: str) -> bool:
+    want = _pair(pair)
+    for row in rows:
+        row_pair = _pair(row.get("trading_pair") or row.get("symbol"))
+        if want and row_pair != want:
+            continue
+        amount = _optional_float(row.get("amount"))
+        if amount is None:
+            amount = _optional_float(row.get("net_amount_base"))
+        if amount:
+            return True
+    return False
+
+
 async def _apply_margin(
     trading: Any,
     account: str,
@@ -191,9 +225,25 @@ async def _apply_margin(
     pair: str,
     config: dict,
     matched: Optional[dict],
+    rows: list[dict],
 ) -> bool:
     explicit = bool(config.get("margin_explicit"))
-    requested = _margin_name(config.get("margin_mode")) if explicit else None
+    requested = _margin_name(config.get("margin_mode"))
+    # No row on this side. MEXC needs openType, so the displayed mode stays
+    # on the config. Isolated is the form default when the payload left it out.
+    if matched is None and _is_opening(config):
+        if _requested_side(config.get("side")) is None and _rows_on_pair(rows, pair):
+            raise AccountSettingsError(
+                "Choose a margin mode: no open position on this side"
+            )
+        mode = requested or "ISOLATED"
+        config["margin_mode"] = mode
+        # The stock margin route has no side. Skip it when the other side is
+        # open, and leave this side's mode on the executor config.
+        if not _rows_on_pair(rows, pair):
+            await _set_margin_mode(trading, account, connector, pair, mode)
+        config["margin_mode"] = mode
+        return True
     # The documented MEXC row has leverage and no margin field. An order that
     # does not ask to change margin must not be refused for that absence.
     if not explicit or requested is None:

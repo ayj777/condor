@@ -237,15 +237,15 @@ def test_a_missing_position_read_aborts_and_a_default_margin_is_not_sent():
     )
     assert applied is True
     assert trading.leverage_calls == []
-    assert "margin_mode" not in config
+    assert config["margin_mode"] == "ISOLATED"
 
     config["margin_mode"] = "CROSS"
     config["margin_explicit"] = True
     applied = asyncio.run(
         apply_venue_account_settings(client, "master_account", config)
     )
-    assert applied is False
-    assert "margin_mode" not in config
+    assert applied is True
+    assert config["margin_mode"] == "CROSS"
     assert trading.margin_calls
     assert trading.leverage_calls == []
 
@@ -374,7 +374,7 @@ class _CM:
 _USER = WebUser(id=1, role="admin")
 
 
-def test_creating_a_mexc_order_does_not_set_leverage_or_send_margin(monkeypatch):
+def test_creating_a_mexc_order_does_not_set_leverage_and_keeps_flat_margin(monkeypatch):
     from fastapi import HTTPException
 
     trading = _Trading()
@@ -447,7 +447,7 @@ def test_creating_a_mexc_order_does_not_set_leverage_or_send_margin(monkeypatch)
     assert result["executor_id"] == "ex-mexc"
     assert result["margin_mode_applied"] is True
     assert seen["config"]["leverage"] == 2
-    assert "margin_mode" not in seen["config"]
+    assert seen["config"]["margin_mode"] == "CROSS"
     assert trading.leverage_calls == []
 
     with pytest.raises(HTTPException) as low:
@@ -843,8 +843,7 @@ def test_range_iceberg_is_created_when_margin_can_be_omitted(monkeypatch):
         )
     )
     assert result["executor_id"] == "ex-ice"
-    assert seen["config"].get("margin_mode") != "ISOLATED"
-    assert "margin_mode" not in seen["config"]
+    assert seen["config"]["margin_mode"] == "ISOLATED"
 
     monkeypatch.setitem(
         venue_capabilities.TRADING_PROFILES,
@@ -1131,6 +1130,51 @@ def test_leverage_names_the_side_when_both_books_are_open():
     assert trading.leverage_calls == [
         ("master_account", "mexc_perpetual", "AIOT-USDT", 5, "SHORT")
     ]
+
+
+def test_a_flat_side_keeps_isolated_and_an_open_side_does_not():
+    trading = _Trading(margin_status=404)
+
+    async def get_positions(**_kwargs):
+        return {
+            "data": [
+                {
+                    "connector_name": "mexc_perpetual",
+                    "trading_pair": "AIOT-USDT",
+                    "position_side": "LONG",
+                    "amount": 60770,
+                    "leverage": 2,
+                    "open_type": 1,
+                }
+            ]
+        }
+
+    trading.get_positions = get_positions
+    client = FakeClient()
+    client.trading = trading
+    short = {
+        "connector_name": "mexc_perpetual",
+        "trading_pair": "AIOT-USDT",
+        "side": 2,
+        "leverage": 1,
+        "position_action": "OPEN",
+    }
+    applied = asyncio.run(apply_venue_account_settings(client, "master_account", short))
+    assert applied is True
+    assert short["margin_mode"] == "ISOLATED"
+    assert trading.margin_calls == []
+
+    long = {
+        "connector_name": "mexc_perpetual",
+        "trading_pair": "AIOT-USDT",
+        "side": 1,
+        "leverage": 2,
+        "margin_mode": "ISOLATED",
+        "position_action": "OPEN",
+    }
+    applied = asyncio.run(apply_venue_account_settings(client, "master_account", long))
+    assert applied is True
+    assert "margin_mode" not in long
 
 
 def test_a_short_apply_does_not_name_the_only_long():
