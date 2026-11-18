@@ -1,7 +1,15 @@
 import { useState } from "react";
 
 import { formatTokenAmount, orderStep, roundDownNote, sizeUnitChoices, type SizeRule } from "@/lib/order-size";
-import { formatInterval, icebergSentSize, rangeIcebergPreview } from "@/lib/range-iceberg";
+import {
+  exitPreviewText,
+  exitReference,
+  formatInterval,
+  icebergSentSize,
+  rangeIcebergPreview,
+  type ExitKind,
+  type RangeIcebergExitInput,
+} from "@/lib/range-iceberg";
 import { rangeIcebergInput, type OrderAction, type OrderState } from "./order-config";
 import { NumberField, PriceField, SectionHeader, SelectField } from "./fields";
 
@@ -29,6 +37,200 @@ const CATCH_UP_OPTIONS = [
   { value: "CARRY", label: "Carry" },
   { value: "SKIP", label: "Skip" },
 ];
+const ARM_OPTIONS = [
+  { value: "ON_FULL_FILL", label: "After full fill" },
+  { value: "ON_ANY_FILL", label: "On any fill" },
+];
+const TRIGGER_OPTIONS = [
+  { value: "percent", label: "Percent" },
+  { value: "price", label: "Price" },
+];
+const EXECUTION_OPTIONS = [
+  { value: "SINGLE", label: "Single order" },
+  { value: "ICEBERG", label: "Iceberg" },
+];
+const EXIT_ORDER_OPTIONS = [
+  { value: "LIMIT", label: "Limit" },
+  { value: "MARKET", label: "Market" },
+];
+const EXIT_PRICE_OPTIONS = [
+  { value: "LIMIT", label: "Up to" },
+  { value: "RANGE", label: "Range" },
+];
+
+type ExitPrefix = "ri_tp" | "ri_sl";
+
+function exitDraft(state: OrderState, prefix: ExitPrefix): RangeIcebergExitInput {
+  if (prefix === "ri_tp") {
+    return {
+      trigger: state.ri_tp_trigger,
+      percent: state.ri_tp_percent,
+      price: state.ri_tp_price,
+      execution: state.ri_tp_execution,
+      orderType: state.ri_tp_order_type,
+      slices: state.ri_tp_slices,
+      visibleCount: state.ri_tp_visible_count,
+      interval: state.ri_tp_interval,
+      priceStyle: state.ri_tp_price_style,
+      limitPrice: state.ri_tp_limit_price,
+      priceLow: state.ri_tp_price_low,
+      priceHigh: state.ri_tp_price_high,
+    };
+  }
+  return {
+    trigger: state.ri_sl_trigger,
+    percent: state.ri_sl_percent,
+    price: state.ri_sl_price,
+    execution: state.ri_sl_execution,
+    orderType: "MARKET",
+    slices: state.ri_sl_slices,
+    visibleCount: state.ri_sl_visible_count,
+    interval: state.ri_sl_interval,
+    priceStyle: state.ri_sl_price_style,
+    limitPrice: state.ri_sl_limit_price,
+    priceLow: state.ri_sl_price_low,
+    priceHigh: state.ri_sl_price_high,
+  };
+}
+
+function ExitEditor({
+  title,
+  kind,
+  prefix,
+  stop,
+  state,
+  dispatch,
+  reference,
+}: {
+  title: string;
+  kind: ExitKind;
+  prefix: ExitPrefix;
+  stop: boolean;
+  state: OrderState;
+  dispatch: React.Dispatch<OrderAction>;
+  reference: { price: number; label: string } | null;
+}) {
+  const enabled = prefix === "ri_tp" ? state.ri_tp_enabled : state.ri_sl_enabled;
+  const draft = exitDraft(state, prefix);
+  const name = (field: string) => `${prefix}_${field}`;
+  const long = state.side === 1;
+  const priceValid = (() => {
+    if (!(draft.price > 0) || !reference) return draft.price > 0;
+    const above = kind === "take_profit" ? long : !long;
+    return above ? draft.price > reference.price : draft.price < reference.price;
+  })();
+  return (
+    <div className="space-y-2.5 rounded border border-[var(--color-border)] p-2">
+      <Toggle label={title} checked={enabled} onChange={(v) => dispatch({ type: "SET_FIELD", field: name("enabled"), value: v })} />
+      {enabled && (
+        <>
+          <SelectField
+            label={`${title} trigger`}
+            value={draft.trigger}
+            field={name("trigger")}
+            dispatch={dispatch}
+            options={TRIGGER_OPTIONS}
+          />
+          {draft.trigger === "percent" ? (
+            <NumberField
+              label="Percent"
+              value={draft.percent}
+              field={name("percent")}
+              dispatch={dispatch}
+              step={0.0001}
+              min={0}
+              isPercent
+              suffix="%"
+            />
+          ) : (
+            <PriceField
+              label="Trigger price"
+              value={draft.price}
+              field={name("price")}
+              activePickField={state.activePickField}
+              dispatch={dispatch}
+              valid={priceValid}
+            />
+          )}
+          <p className="text-[10px] text-[var(--color-text-muted)]">
+            {exitPreviewText(kind, draft, reference)}
+          </p>
+          <SelectField
+            label={`${title} close`}
+            value={draft.execution}
+            field={name("execution")}
+            dispatch={dispatch}
+            options={EXECUTION_OPTIONS}
+          />
+          {draft.execution === "SINGLE" && !stop && (
+            <SelectField
+              label="Order type"
+              value={draft.orderType}
+              field={name("order_type")}
+              dispatch={dispatch}
+              options={EXIT_ORDER_OPTIONS}
+            />
+          )}
+          {draft.execution === "SINGLE" && stop && (
+            <p className="text-[10px] text-[var(--color-text-muted)]">
+              A single stop loss sends a market order.
+            </p>
+          )}
+          {draft.execution === "ICEBERG" && (
+            <>
+              <div className="grid grid-cols-2 gap-2">
+                <NumberField label="Slices" value={draft.slices} field={name("slices")} dispatch={dispatch} step={1} min={1} />
+                <NumberField label="Visible count" value={draft.visibleCount} field={name("visible_count")} dispatch={dispatch} step={1} min={1} />
+              </div>
+              <TextField
+                label="Interval"
+                value={draft.interval}
+                placeholder="30s, empty sends all at once"
+                onChange={(v) => dispatch({ type: "SET_FIELD", field: name("interval"), value: v })}
+              />
+              <SelectField
+                label={`${title} prices`}
+                value={draft.priceStyle}
+                field={name("price_style")}
+                dispatch={dispatch}
+                options={EXIT_PRICE_OPTIONS}
+              />
+              {draft.priceStyle === "LIMIT" ? (
+                <PriceField
+                  label="Limit price"
+                  value={draft.limitPrice}
+                  field={name("limit_price")}
+                  activePickField={state.activePickField}
+                  dispatch={dispatch}
+                  valid={draft.limitPrice > 0}
+                />
+              ) : (
+                <>
+                  <PriceField
+                    label="Price low"
+                    value={draft.priceLow}
+                    field={name("price_low")}
+                    activePickField={state.activePickField}
+                    dispatch={dispatch}
+                    valid={draft.priceLow > 0 && (draft.priceHigh <= 0 || draft.priceLow <= draft.priceHigh)}
+                  />
+                  <PriceField
+                    label="Price high"
+                    value={draft.priceHigh}
+                    field={name("price_high")}
+                    activePickField={state.activePickField}
+                    dispatch={dispatch}
+                    valid={draft.priceHigh > 0 && draft.priceHigh >= draft.priceLow}
+                  />
+                </>
+              )}
+            </>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
 
 function Toggle({
   label,
@@ -98,6 +300,7 @@ export function RangeIcebergFields({
     dispatch({ type: "SET_FIELD", field, value });
   const input = rangeIcebergInput(state);
   const preview = rangeIcebergPreview(input);
+  const reference = exitReference(input);
   const price = state.ri_mode === "UP_TO"
     ? state.ri_limit_price
     : Math.max(state.ri_price_low, state.ri_price_high);
@@ -201,6 +404,35 @@ export function RangeIcebergFields({
       <SelectField label="Catch up" value={state.ri_catch_up} field="ri_catch_up" dispatch={dispatch} options={CATCH_UP_OPTIONS} />
       <SelectField label="Cap behavior" value={state.ri_cap_behavior} field="ri_cap_behavior" dispatch={dispatch} options={CAP_OPTIONS} />
       <Toggle label="Reduce only" checked={state.ri_reduce_only} onChange={(v) => set("ri_reduce_only", v)} />
+      <SectionHeader>Exits</SectionHeader>
+      <SelectField
+        label="Arm exits"
+        value={state.ri_exit_arming}
+        field="ri_exit_arming"
+        dispatch={dispatch}
+        options={ARM_OPTIONS}
+      />
+      <p className="text-[10px] text-[var(--color-text-muted)]">
+        After full fill waits for the whole entry. On any fill can protect a partial fill.
+      </p>
+      <ExitEditor
+        title="Take profit"
+        kind="take_profit"
+        prefix="ri_tp"
+        stop={false}
+        state={state}
+        dispatch={dispatch}
+        reference={reference}
+      />
+      <ExitEditor
+        title="Stop loss"
+        kind="stop_loss"
+        prefix="ri_sl"
+        stop
+        state={state}
+        dispatch={dispatch}
+        reference={reference}
+      />
       {preview && (
         <div className="rounded border border-[var(--color-border)] bg-[var(--color-bg)] px-2.5 py-2 text-[10px] text-[var(--color-text-muted)]">
           <p className="font-medium text-[var(--color-text)]">Preview</p>

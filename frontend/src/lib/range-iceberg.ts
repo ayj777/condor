@@ -15,6 +15,34 @@ export type CapBehavior = "REST_AT_CAP" | "WAIT";
 export type Distribution = "LINEAR" | "GEOMETRIC" | "WEIGHTED";
 export type CatchUp = "CARRY" | "SKIP";
 export type MarginMode = "ISOLATED" | "CROSS";
+export type ExitArming = "ON_FULL_FILL" | "ON_ANY_FILL";
+export type ExitTrigger = "percent" | "price";
+export type ExitExecution = "SINGLE" | "ICEBERG";
+export type ExitOrderType = "LIMIT" | "MARKET";
+export type ExitPriceStyle = "LIMIT" | "RANGE";
+export type ExitKind = "take_profit" | "stop_loss";
+
+/**
+ * One optional close. `percent` is a fraction (0.02 is 2%) and is exclusive
+ * with `price`. An iceberg close needs a limit cap or a price range.
+ */
+export interface RangeIcebergExitInput {
+  trigger: ExitTrigger;
+  /** Fraction of the entry price. 0.02 is 2%. */
+  percent: number;
+  price: number;
+  execution: ExitExecution;
+  /** Single take profit only. A single stop loss is always a market order. */
+  orderType: ExitOrderType;
+  slices: number;
+  visibleCount: number;
+  /** Seconds or `30s`. Empty releases every slice when the exit starts. */
+  interval: string;
+  priceStyle: ExitPriceStyle;
+  limitPrice: number;
+  priceLow: number;
+  priceHigh: number;
+}
 
 export interface RangeIcebergInput {
   side: "BUY" | "SELL";
@@ -46,6 +74,11 @@ export interface RangeIcebergInput {
   expirySeconds: number;
   maxSlippage: number;
   randomSeed: string;
+  /** Omitted from the payload when both exits are off. Default is a full fill. */
+  exitArming?: ExitArming;
+  /** Null leaves the exit out of the create payload. */
+  takeProfit?: RangeIcebergExitInput | null;
+  stopLoss?: RangeIcebergExitInput | null;
 }
 
 const DURATION = /^\s*(\d+(?:\.\d+)?)\s*([smhd])?\s*$/i;
@@ -111,6 +144,190 @@ export function rangeIcebergPreview(input: RangeIcebergInput): RangeIcebergPrevi
   return { total: input.totalAmount, perSlice, intervalSeconds, maxPrice, sliceCount };
 }
 
+/** A decimal the executor accepts, without binary float noise. */
+export function decimalString(value: number): string {
+  if (!Number.isFinite(value)) return "0";
+  return String(Number(value.toPrecision(12)));
+}
+
+/** The price a percent trigger is measured from: the limit, or the range mid. */
+export function exitReference(
+  input: Pick<RangeIcebergInput, "mode" | "limitPrice" | "priceLow" | "priceHigh">,
+): { price: number; label: string } | null {
+  if (input.mode === "UP_TO") {
+    return input.limitPrice > 0 ? { price: input.limitPrice, label: "limit" } : null;
+  }
+  if (input.priceLow > 0 && input.priceHigh > 0 && input.priceLow <= input.priceHigh) {
+    return { price: (input.priceLow + input.priceHigh) / 2, label: "range mid" };
+  }
+  return null;
+}
+
+/**
+ * Trigger for one side. Percent moves above the entry for a long take profit
+ * and a short stop, and below it for a long stop and a short take profit.
+ * An absolute price is the same number for both sides.
+ */
+export function exitTriggerPrice(
+  side: "BUY" | "SELL",
+  kind: ExitKind,
+  exit: Pick<RangeIcebergExitInput, "trigger" | "percent" | "price">,
+  reference: number,
+): number | null {
+  if (!(reference > 0)) return null;
+  if (exit.trigger === "price") return exit.price > 0 ? exit.price : null;
+  if (!(exit.percent > 0) || exit.percent >= 1) return null;
+  const long = side === "BUY";
+  const above = kind === "take_profit" ? long : !long;
+  return reference * (above ? 1 + exit.percent : 1 - exit.percent);
+}
+
+export function formatTriggerPrice(price: number): string {
+  if (!(price > 0) || !Number.isFinite(price)) return "";
+  const precise = Number(price.toPrecision(8));
+  if (precise >= 1000) return precise.toFixed(2);
+  if (precise >= 1) return precise.toFixed(4);
+  return String(precise);
+}
+
+/** Live long and short triggers from the entry or limit price. */
+export function exitPreviewText(
+  kind: ExitKind,
+  exit: RangeIcebergExitInput,
+  reference: { price: number; label: string } | null,
+): string {
+  if (!reference) return "Set the entry or limit price to preview the trigger.";
+  const from = `from ${reference.label} ${formatTriggerPrice(reference.price)}`;
+  const long = exitTriggerPrice("BUY", kind, exit, reference.price);
+  const short = exitTriggerPrice("SELL", kind, exit, reference.price);
+  if (long == null || short == null) {
+    return exit.trigger === "percent"
+      ? `Enter a percent to preview the trigger ${from}.`
+      : `Enter a price to preview the trigger ${from}.`;
+  }
+  return `Long ${formatTriggerPrice(long)}, short ${formatTriggerPrice(short)}, ${from}.`;
+}
+
+function wholeCount(value: number): boolean {
+  return Number.isInteger(value) && value >= 1;
+}
+
+function exitLabel(kind: ExitKind): string {
+  return kind === "take_profit" ? "Take profit" : "Stop loss";
+}
+
+function triggerAboveEntry(kind: ExitKind, side: "BUY" | "SELL"): boolean {
+  const long = side === "BUY";
+  return kind === "take_profit" ? long : !long;
+}
+
+function validateExit(
+  kind: ExitKind,
+  exit: RangeIcebergExitInput,
+  side: "BUY" | "SELL",
+  reference: number | null,
+): string | null {
+  const label = exitLabel(kind);
+  if (exit.trigger === "percent") {
+    if (!(exit.percent > 0) || exit.percent >= 1) {
+      return `${label} percent must be greater than 0 and less than 1`;
+    }
+  } else if (!(exit.price > 0)) {
+    return `${label} price is required`;
+  }
+  if (reference != null && reference > 0) {
+    const trigger = exit.trigger === "price"
+      ? exit.price
+      : exitTriggerPrice(side, kind, exit, reference);
+    if (trigger != null) {
+      const wantAbove = triggerAboveEntry(kind, side);
+      const long = side === "BUY";
+      if (wantAbove && !(trigger > reference)) {
+        return `${label} must be above the entry for a ${long ? "long" : "short"}`;
+      }
+      if (!wantAbove && !(trigger < reference)) {
+        return `${label} must be below the entry for a ${long ? "long" : "short"}`;
+      }
+    }
+  }
+  if (exit.execution !== "ICEBERG") return null;
+  if (!wholeCount(exit.slices)) return `${label} slices must be a whole number of at least 1`;
+  if (!wholeCount(exit.visibleCount)) {
+    return `${label} visible count must be a whole number of at least 1`;
+  }
+  if (exit.visibleCount > exit.slices) return `${label} visible count cannot exceed slices`;
+  if (exit.interval.trim()) {
+    const seconds = parseDuration(exit.interval);
+    if (seconds == null || !(seconds > 0)) {
+      return `${label} interval must be seconds or a value like 30s`;
+    }
+  }
+  const hasLimit = exit.priceStyle === "LIMIT";
+  if (hasLimit) {
+    if (!(exit.limitPrice > 0)) {
+      return `${label} iceberg needs a limit price, or a price low and a price high`;
+    }
+  } else if (!(exit.priceLow > 0) || !(exit.priceHigh > 0)) {
+    return `${label} iceberg needs a limit price, or a price low and a price high`;
+  } else if (exit.priceLow > exit.priceHigh) {
+    return `${label} price low must be at or below price high`;
+  }
+  return null;
+}
+
+function validateExits(input: RangeIcebergInput): string | null {
+  const take = input.takeProfit ?? null;
+  const stop = input.stopLoss ?? null;
+  if (!take && !stop) return null;
+  if (input.reduceOnly) {
+    return "Take profit and stop loss cannot be set when reduce only is on";
+  }
+  const reference = exitReference(input)?.price ?? null;
+  if (take) {
+    const message = validateExit("take_profit", take, input.side, reference);
+    if (message) return message;
+  }
+  if (stop) {
+    const message = validateExit("stop_loss", stop, input.side, reference);
+    if (message) return message;
+  }
+  if (
+    take &&
+    stop &&
+    take.trigger === "price" &&
+    stop.trigger === "price" &&
+    take.price > 0 &&
+    stop.price > 0
+  ) {
+    if (input.side === "BUY" && !(stop.price < take.price)) {
+      return "Stop loss price must be below the take profit price for a long";
+    }
+    if (input.side === "SELL" && !(stop.price > take.price)) {
+      return "Stop loss price must be above the take profit price for a short";
+    }
+  }
+  return null;
+}
+
+function exitPayload(kind: ExitKind, exit: RangeIcebergExitInput): Record<string, unknown> {
+  const body: Record<string, unknown> = { execution: exit.execution };
+  if (exit.trigger === "percent") body.percent = decimalString(exit.percent);
+  else body.price = decimalString(exit.price);
+  if (exit.execution === "SINGLE") {
+    body.order_type = kind === "stop_loss" ? "MARKET" : exit.orderType;
+    return body;
+  }
+  body.slices = exit.slices;
+  body.visible_count = exit.visibleCount;
+  if (exit.interval.trim()) body.interval = exit.interval.trim();
+  if (exit.priceStyle === "LIMIT") body.limit_price = decimalString(exit.limitPrice);
+  else {
+    body.price_low = decimalString(exit.priceLow);
+    body.price_high = decimalString(exit.priceHigh);
+  }
+  return body;
+}
+
 /** The first rule the config would reject, or null when the create can proceed. */
 export function validateRangeIceberg(input: RangeIcebergInput): string | null {
   if (!(input.totalAmount > 0)) return "Total amount is required";
@@ -160,7 +377,7 @@ export function validateRangeIceberg(input: RangeIcebergInput): string | null {
   if (input.randomSeed.trim() && !/^-?\d+$/.test(input.randomSeed.trim())) {
     return "Random seed must be an integer";
   }
-  return null;
+  return validateExits(input);
 }
 
 export interface IcebergSent {
@@ -305,6 +522,9 @@ export function rangeIcebergConfig(
     if (input.scheduleSlices >= 1) config.schedule_slices = input.scheduleSlices;
     else if (input.scheduleInterval.trim()) config.schedule_interval = input.scheduleInterval.trim();
   }
+  if (input.takeProfit) config.take_profit = exitPayload("take_profit", input.takeProfit);
+  if (input.stopLoss) config.stop_loss = exitPayload("stop_loss", input.stopLoss);
+  if (input.takeProfit || input.stopLoss) config.exit_arming = input.exitArming ?? "ON_FULL_FILL";
   return config;
 }
 
