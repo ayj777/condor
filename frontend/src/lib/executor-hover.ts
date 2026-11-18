@@ -15,6 +15,11 @@ export interface HoverRow {
   value: string;
 }
 
+export interface ExecutorWarning {
+  title: string;
+  detail: string;
+}
+
 export interface ExecutorHoverModel {
   type: string;
   side: string;
@@ -24,6 +29,7 @@ export interface ExecutorHoverModel {
   orders: HoverOrder[];
   closeType: string;
   statusMessage: string;
+  warnings: ExecutorWarning[];
 }
 
 const WORKING = new Set([
@@ -271,7 +277,9 @@ export function executorHoverModel(executor: ExecutorInfo, now = Date.now()): Ex
   ]));
   if (avg != null && avg > 0) add("Avg fill", priceText(avg));
 
-  addExitRows(rows, info, executor.trading_pair);
+  const top = executor as unknown as Record<string, unknown>;
+  const stopInPlace = exchangeStopInPlace(info, top);
+  addExitRows(rows, info, executor.trading_pair, stopInPlace);
 
   if (started != null) add("Started", formatStartMyt(started));
 
@@ -287,7 +295,68 @@ export function executorHoverModel(executor: ExecutorInfo, now = Date.now()): Ex
     orders: hoverOrders(info),
     closeType: pretty(text(executor.close_type)),
     statusMessage,
+    warnings: executorWarnings(executor, info, top, stopInPlace),
   };
+}
+
+function owns(source: Record<string, unknown>, key: string): boolean {
+  if (!Object.prototype.hasOwnProperty.call(source, key)) return false;
+  const value = source[key];
+  if (typeof value === "boolean") return true;
+  return value != null && value !== "";
+}
+
+/** custom_info wins. The executor record is the fallback when the key is only there. */
+function lookup(info: Record<string, unknown>, top: Record<string, unknown>, key: string): unknown {
+  if (owns(info, key)) return info[key];
+  if (owns(top, key)) return top[key];
+  return undefined;
+}
+
+function flag(value: unknown): boolean | null {
+  if (value === true || value === "true" || value === 1 || value === "1") return true;
+  if (value === false || value === "false" || value === 0 || value === "0") return false;
+  return null;
+}
+
+function messageText(value: unknown): string {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    const row = value as Record<string, unknown>;
+    return text(row.message ?? row.error ?? row.detail);
+  }
+  return text(value);
+}
+
+/**
+ * `has_exchange_stop` decides when the executor sends it.
+ * Otherwise a stop order id still means the stop is in place, and an error means it is not.
+ */
+function exchangeStopInPlace(info: Record<string, unknown>, top: Record<string, unknown>): boolean {
+  const raw = lookup(info, top, "has_exchange_stop");
+  const parsed = flag(raw);
+  if (raw !== undefined && parsed != null) return parsed;
+  if (messageText(lookup(info, top, "exchange_stop_error"))) return false;
+  return text(lookup(info, top, "exchange_stop_order_id")) !== "";
+}
+
+function executorWarnings(
+  executor: ExecutorInfo,
+  info: Record<string, unknown>,
+  top: Record<string, unknown>,
+  stopInPlace: boolean,
+): ExecutorWarning[] {
+  const warnings: ExecutorWarning[] = [];
+  const stopError = messageText(lookup(info, top, "exchange_stop_error"));
+  if (stopError) warnings.push({ title: "Exchange stop is not placed", detail: stopError });
+  const resumeError = messageText(lookup(info, top, "resume_error"));
+  if (flag(lookup(info, top, "resume_failed")) === true || resumeError) {
+    warnings.push({ title: "Resume failed", detail: resumeError });
+  }
+  const closeType = stateToken(text(executor.close_type) || text(lookup(info, top, "close_type")));
+  if (closeType === "POSITION_HOLD" && stopInPlace) {
+    warnings.push({ title: "The exchange stop is still on MEXC.", detail: "" });
+  }
+  return warnings;
 }
 
 function quotePnl(value: number): string {
@@ -326,7 +395,7 @@ function idCount(value: unknown): number {
  * Trigger prices are the executor's own numbers. A percent on the form is only
  * an estimate from the limit or the range mid, so this card does not recompute one.
  */
-function addExitRows(rows: HoverRow[], info: Record<string, unknown>, pair: string) {
+function addExitRows(rows: HoverRow[], info: Record<string, unknown>, pair: string, exchangeStop: boolean) {
   const add = (label: string, value: string) => {
     if (value) rows.push({ label, value });
   };
@@ -342,7 +411,6 @@ function addExitRows(rows: HoverRow[], info: Record<string, unknown>, pair: stri
   const hasExitState = stateKey !== "";
   const stateLabel =
     EXIT_STATE_LABELS[stateKey] ?? (hasExitState && stateKey !== "NONE" ? pretty(stateKey) : "");
-  const exchangeStop = text(info.exchange_stop_order_id) !== "";
   const exitOrders = idCount(info.exit_order_ids);
 
   const hasTrigger = (tpTrigger != null && tpTrigger > 0) || (slTrigger != null && slTrigger > 0);

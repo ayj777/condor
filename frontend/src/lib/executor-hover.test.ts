@@ -345,6 +345,89 @@ describe("executor hover details", () => {
     expect(closing.rows.find((row) => row.label === "Exit")?.value).toBe("Stop Loss");
     expect(closing.rows.find((row) => row.label === "Open")?.value).toBe("60 AIOT");
   });
+
+  it("warns when the exchange stop was not placed, and prefers has_exchange_stop", () => {
+    const failed = executorHoverModel(
+      executor({
+        timestamp: 0,
+        pnl: 0,
+        custom_info: {
+          exchange_stop_error: "MEXC rejected the stop: insufficient margin",
+          exchange_stop_order_id: "stop-should-not-show",
+        },
+      }),
+    );
+    expect(failed.warnings).toEqual([
+      { title: "Exchange stop is not placed", detail: "MEXC rejected the stop: insufficient margin" },
+    ]);
+    expect(failed.rows.find((row) => row.label === "Exchange stop")).toBeUndefined();
+    expect(JSON.stringify(failed)).not.toContain("stop-should-not-show");
+
+    const flagged = executorHoverModel(
+      executor({
+        timestamp: 0,
+        pnl: 0,
+        custom_info: { has_exchange_stop: true },
+      }),
+    );
+    expect(flagged.rows.find((row) => row.label === "Exchange stop")?.value).toBe("In place");
+    expect(flagged.warnings).toEqual([]);
+
+    const cleared = executorHoverModel(
+      executor({
+        timestamp: 0,
+        pnl: 0,
+        custom_info: { has_exchange_stop: false, exchange_stop_order_id: "still-there" },
+      }),
+    );
+    expect(cleared.rows.find((row) => row.label === "Exchange stop")).toBeUndefined();
+    expect(JSON.stringify(cleared)).not.toContain("still-there");
+  });
+
+  it("reads a resume failure and a live stop on a position hold from custom_info or the record", () => {
+    const resumed = executorHoverModel(
+      executor({
+        timestamp: 0,
+        pnl: 0,
+        custom_info: { resume_failed: true, resume_error: "connector offline" },
+      }),
+    );
+    expect(resumed.warnings).toEqual([{ title: "Resume failed", detail: "connector offline" }]);
+
+    const held = executorHoverModel(
+      executor({
+        timestamp: 0,
+        pnl: 0,
+        close_type: "POSITION_HOLD",
+        custom_info: { has_exchange_stop: "true" },
+      }),
+    );
+    expect(held.rows.find((row) => row.label === "Exchange stop")?.value).toBe("In place");
+    expect(held.warnings).toEqual([{ title: "The exchange stop is still on MEXC.", detail: "" }]);
+
+    const fromRecord = executorHoverModel({
+      ...executor({ timestamp: 0, pnl: 0, close_type: "position_hold", custom_info: {} }),
+      has_exchange_stop: true,
+      resume_failed: true,
+      resume_error: "state restore failed",
+    } as ExecutorInfo);
+    expect(fromRecord.rows.find((row) => row.label === "Exchange stop")?.value).toBe("In place");
+    expect(fromRecord.warnings).toEqual([
+      { title: "Resume failed", detail: "state restore failed" },
+      { title: "The exchange stop is still on MEXC.", detail: "" },
+    ]);
+
+    const flat = executorHoverModel(
+      executor({
+        timestamp: 0,
+        pnl: 0,
+        close_type: "POSITION_HOLD",
+        custom_info: { has_exchange_stop: false },
+      }),
+    );
+    expect(flat.warnings).toEqual([]);
+    expect(flat.rows.find((row) => row.label === "Exchange stop")).toBeUndefined();
+  });
 });
 
 describe("placePopup", () => {

@@ -160,6 +160,22 @@ export function ExecutorDetailPopup({
           <span className="ml-auto text-[10px] capitalize text-[var(--color-text-muted)]">{model.status}</span>
         )}
       </div>
+      {model.warnings.length > 0 && (
+        <div className="mb-1.5 space-y-1">
+          {model.warnings.map((warning) => (
+            <p
+              key={`${warning.title}:${warning.detail}`}
+              role="status"
+              className="rounded border border-[var(--color-yellow)]/50 bg-[var(--color-yellow)]/10 px-1.5 py-1 text-[10px] text-[var(--color-text)]"
+            >
+              <span className="font-medium">{warning.title}</span>
+              {warning.detail ? (
+                <span className="mt-0.5 block break-words font-mono text-[var(--color-text-muted)]">{warning.detail}</span>
+              ) : null}
+            </p>
+          ))}
+        </div>
+      )}
       <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5">
         {model.rows.map((row) => (
           <div key={row.label} className="contents">
