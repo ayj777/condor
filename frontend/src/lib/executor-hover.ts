@@ -271,6 +271,8 @@ export function executorHoverModel(executor: ExecutorInfo, now = Date.now()): Ex
   ]));
   if (avg != null && avg > 0) add("Avg fill", priceText(avg));
 
+  addExitRows(rows, info, executor.trading_pair);
+
   if (started != null) add("Started", formatStartMyt(started));
 
   const positionSide = text(first(cfg, info, ["position_side", "positionSide"])).replace(/^.*\./, "").toUpperCase();
@@ -286,6 +288,50 @@ export function executorHoverModel(executor: ExecutorInfo, now = Date.now()): Ex
     closeType: pretty(text(executor.close_type)),
     statusMessage,
   };
+}
+
+function quotePnl(value: number): string {
+  const text = formatTokenAmount(Math.abs(value));
+  if (value > 0) return `+${text}`;
+  if (value < 0) return `-${text}`;
+  return text;
+}
+
+/**
+ * Exit progress from a range iceberg `custom_info`.
+ *
+ * Idle with no trigger and no fill is left out, so an order that never armed
+ * an exit does not grow a row of zeros.
+ */
+function addExitRows(rows: HoverRow[], info: Record<string, unknown>, pair: string) {
+  const add = (label: string, value: string) => {
+    if (value) rows.push({ label, value });
+  };
+  const tpTrigger = num(info.take_profit_trigger_price);
+  const slTrigger = num(info.stop_loss_trigger_price);
+  const status = text(info.exit_status).toLowerCase();
+  const active = text(info.exit_active).toLowerCase();
+  const filled = num(info.exit_filled_amount);
+  const average = num(info.exit_average_price);
+  const pnl = num(info.realized_pnl_quote);
+  const hasTrigger = (tpTrigger != null && tpTrigger > 0) || (slTrigger != null && slTrigger > 0);
+  const hasFill = filled != null && filled > 0;
+  const moving = status !== "" && status !== "idle";
+  if (!hasTrigger && !hasFill && !moving && !active) return;
+
+  const [base, quote] = (pair || "").split("-");
+  if (tpTrigger != null && tpTrigger > 0) add("TP trigger", priceText(tpTrigger));
+  if (slTrigger != null && slTrigger > 0) add("SL trigger", priceText(slTrigger));
+  if (status && (status !== "idle" || hasTrigger || hasFill || active)) add("Exit status", pretty(status));
+  if (active) add("Exit", pretty(active));
+  if (filled != null && filled > 0) {
+    const amount = formatTokenAmount(filled);
+    add("Exit filled", base ? `${amount} ${base}` : amount);
+  }
+  if (average != null && average > 0) add("Exit avg", priceText(average));
+  if (pnl != null && (hasFill || moving || active)) {
+    add("Realized PnL", quote ? `${quotePnl(pnl)} ${quote}` : quotePnl(pnl));
+  }
 }
 
 export interface PopupAnchor {

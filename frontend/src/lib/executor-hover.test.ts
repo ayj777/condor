@@ -164,6 +164,55 @@ describe("executor hover details", () => {
     expect(bare.closeType).toBe("");
     expect(bare.statusMessage).toBe("");
   });
+
+  it("shows range iceberg exit progress from custom_info", () => {
+    const model = executorHoverModel(
+      executor({
+        timestamp: 0,
+        pnl: 0,
+        custom_info: {
+          take_profit_trigger_price: "0.0816",
+          stop_loss_trigger_price: "0.0792",
+          exit_status: "executing",
+          exit_active: "stop_loss",
+          exit_filled_amount: "2500",
+          exit_average_price: "0.079",
+          realized_pnl_quote: "-12.5",
+        },
+      }),
+    );
+    expect(model.rows).toEqual(
+      expect.arrayContaining([
+        { label: "TP trigger", value: "0.0816" },
+        { label: "SL trigger", value: "0.0792" },
+        { label: "Exit status", value: "Executing" },
+        { label: "Exit", value: "Stop Loss" },
+        { label: "Exit filled", value: "2,500 AIOT" },
+        { label: "Exit avg", value: "0.079" },
+        { label: "Realized PnL", value: "-12.5 USDT" },
+      ]),
+    );
+  });
+
+  it("leaves an idle exit with no trigger off the card", () => {
+    const model = executorHoverModel(
+      executor({
+        timestamp: 0,
+        pnl: 0,
+        custom_info: {
+          exit_status: "idle",
+          exit_active: null,
+          take_profit_trigger_price: null,
+          stop_loss_trigger_price: null,
+          exit_filled_amount: "0",
+          exit_average_price: "0",
+          realized_pnl_quote: "0",
+        },
+      }),
+    );
+    expect(model.rows.map((row) => row.label)).not.toContain("Exit status");
+    expect(model.rows.map((row) => row.label)).not.toContain("Realized PnL");
+  });
 });
 
 describe("placePopup", () => {

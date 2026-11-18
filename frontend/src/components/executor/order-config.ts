@@ -5,14 +5,21 @@
 
 import { useEffect, useMemo, useReducer } from "react";
 
-import type { ChartPriceMapping, ExecutorValidation, PickSlot } from "./types";
+import type { ChartPriceMapping, ExecutorValidation, ExtraLine, PickSlot } from "./types";
 import { loadPersistedDefaults, savePersistedDefaults } from "./persisted-defaults";
 import { ORDER_DEFAULTS_KEY } from "@/lib/sessionState";
 import { legalBaseAmount, quantizePrice, type SizeRule } from "@/lib/order-size";
 import {
+  exitReference,
+  exitTriggerPrice,
   icebergSentSize,
   rangeIcebergConfig,
   validateRangeIceberg,
+  type ExitExecution,
+  type ExitOrderType,
+  type ExitPriceStyle,
+  type ExitTrigger,
+  type RangeIcebergExitInput,
   type RangeIcebergInput,
 } from "@/lib/range-iceberg";
 import { marginForOpen } from "@/lib/trade-guards";
@@ -68,7 +75,48 @@ export interface OrderState {
   ri_max_slippage: number;
   ri_random_seed: string;
   ri_show_advanced: boolean;
+  // Exits stay off until the user turns one on, and a disabled exit is omitted.
+  ri_exit_arming: "ON_FULL_FILL" | "ON_ANY_FILL";
+  ri_tp_enabled: boolean;
+  ri_tp_trigger: ExitTrigger;
+  ri_tp_percent: number;
+  ri_tp_price: number;
+  ri_tp_execution: ExitExecution;
+  ri_tp_order_type: ExitOrderType;
+  ri_tp_slices: number;
+  ri_tp_visible_count: number;
+  ri_tp_interval: string;
+  ri_tp_price_style: ExitPriceStyle;
+  ri_tp_limit_price: number;
+  ri_tp_price_low: number;
+  ri_tp_price_high: number;
+  ri_sl_enabled: boolean;
+  ri_sl_trigger: ExitTrigger;
+  ri_sl_percent: number;
+  ri_sl_price: number;
+  ri_sl_execution: ExitExecution;
+  ri_sl_slices: number;
+  ri_sl_visible_count: number;
+  ri_sl_interval: string;
+  ri_sl_price_style: ExitPriceStyle;
+  ri_sl_limit_price: number;
+  ri_sl_price_low: number;
+  ri_sl_price_high: number;
 }
+
+/** Exit prices follow the market tick. They are not a remembered preference. */
+const EXIT_PRICE_FIELDS = [
+  "ri_tp_price",
+  "ri_tp_limit_price",
+  "ri_tp_price_low",
+  "ri_tp_price_high",
+  "ri_sl_price",
+  "ri_sl_limit_price",
+  "ri_sl_price_low",
+  "ri_sl_price_high",
+] as const satisfies readonly (keyof OrderState)[];
+
+const EXIT_PICK_FIELDS = new Set<string>(EXIT_PRICE_FIELDS);
 
 export type OrderAction =
   | { type: "SET_FIELD"; field: string; value: unknown }
@@ -124,6 +172,32 @@ export const ORDER_DEFAULTS: OrderState = {
   ri_max_slippage: 0,
   ri_random_seed: "",
   ri_show_advanced: false,
+  ri_exit_arming: "ON_FULL_FILL",
+  ri_tp_enabled: false,
+  ri_tp_trigger: "percent",
+  ri_tp_percent: 0,
+  ri_tp_price: 0,
+  ri_tp_execution: "SINGLE",
+  ri_tp_order_type: "LIMIT",
+  ri_tp_slices: 1,
+  ri_tp_visible_count: 1,
+  ri_tp_interval: "",
+  ri_tp_price_style: "LIMIT",
+  ri_tp_limit_price: 0,
+  ri_tp_price_low: 0,
+  ri_tp_price_high: 0,
+  ri_sl_enabled: false,
+  ri_sl_trigger: "percent",
+  ri_sl_percent: 0,
+  ri_sl_price: 0,
+  ri_sl_execution: "SINGLE",
+  ri_sl_slices: 1,
+  ri_sl_visible_count: 1,
+  ri_sl_interval: "",
+  ri_sl_price_style: "LIMIT",
+  ri_sl_limit_price: 0,
+  ri_sl_price_low: 0,
+  ri_sl_price_high: 0,
 };
 
 const STORAGE_KEY = ORDER_DEFAULTS_KEY;
@@ -148,7 +222,7 @@ function saveDefaults(state: OrderState) {
 }
 
 function clearedPrices(state: OrderState): OrderState {
-  return {
+  const next: OrderState = {
     ...state,
     price: 0,
     ri_price_low: 0,
@@ -156,6 +230,8 @@ function clearedPrices(state: OrderState): OrderState {
     ri_limit_price: 0,
     anchored: false,
   };
+  for (const key of EXIT_PRICE_FIELDS) next[key] = 0;
+  return next;
 }
 
 export function orderReducer(state: OrderState, action: OrderAction): OrderState {
@@ -185,22 +261,21 @@ export function orderReducer(state: OrderState, action: OrderAction): OrderState
       return { ...state, leverage: action.value, leverageExplicit: false, leverageTouched: false };
     case "QUANTIZE": {
       const q = (value: number) => quantizePrice(value, action.increment);
-      const next = {
+      const next: OrderState = {
         ...state,
         price: q(state.price),
         ri_price_low: q(state.ri_price_low),
         ri_price_high: q(state.ri_price_high),
         ri_limit_price: q(state.ri_limit_price),
       };
-      if (
+      for (const key of EXIT_PRICE_FIELDS) next[key] = q(state[key]);
+      const same =
         next.price === state.price &&
         next.ri_price_low === state.ri_price_low &&
         next.ri_price_high === state.ri_price_high &&
-        next.ri_limit_price === state.ri_limit_price
-      ) {
-        return state;
-      }
-      return next;
+        next.ri_limit_price === state.ri_limit_price &&
+        EXIT_PRICE_FIELDS.every((key) => next[key] === state[key]);
+      return same ? state : next;
     }
     case "SET_CONNECTOR":
     case "SET_PAIR":
@@ -236,6 +311,48 @@ export function isRangeIceberg(strategy: string): boolean {
   return strategy === "RANGE_ICEBERG";
 }
 
+function oneExit(
+  enabled: boolean,
+  trigger: ExitTrigger,
+  percent: number,
+  price: number,
+  execution: ExitExecution,
+  orderType: ExitOrderType,
+  slices: number,
+  visibleCount: number,
+  interval: string,
+  priceStyle: ExitPriceStyle,
+  limitPrice: number,
+  priceLow: number,
+  priceHigh: number,
+): RangeIcebergExitInput | null {
+  if (!enabled) return null;
+  return {
+    trigger,
+    percent,
+    price,
+    execution,
+    orderType,
+    slices,
+    visibleCount,
+    interval,
+    priceStyle,
+    limitPrice,
+    priceLow,
+    priceHigh,
+  };
+}
+
+function quantizeExit(exit: RangeIcebergExitInput, tick: number): RangeIcebergExitInput {
+  return {
+    ...exit,
+    price: quantizePrice(exit.price, tick),
+    limitPrice: quantizePrice(exit.limitPrice, tick),
+    priceLow: quantizePrice(exit.priceLow, tick),
+    priceHigh: quantizePrice(exit.priceHigh, tick),
+  };
+}
+
 export function rangeIcebergInput(state: OrderState): RangeIcebergInput {
   return {
     side: state.side === 1 ? "BUY" : "SELL",
@@ -267,6 +384,37 @@ export function rangeIcebergInput(state: OrderState): RangeIcebergInput {
     expirySeconds: state.ri_expiry_seconds,
     maxSlippage: state.ri_max_slippage,
     randomSeed: state.ri_random_seed,
+    exitArming: state.ri_exit_arming,
+    takeProfit: oneExit(
+      state.ri_tp_enabled,
+      state.ri_tp_trigger,
+      state.ri_tp_percent,
+      state.ri_tp_price,
+      state.ri_tp_execution,
+      state.ri_tp_order_type,
+      state.ri_tp_slices,
+      state.ri_tp_visible_count,
+      state.ri_tp_interval,
+      state.ri_tp_price_style,
+      state.ri_tp_limit_price,
+      state.ri_tp_price_low,
+      state.ri_tp_price_high,
+    ),
+    stopLoss: oneExit(
+      state.ri_sl_enabled,
+      state.ri_sl_trigger,
+      state.ri_sl_percent,
+      state.ri_sl_price,
+      state.ri_sl_execution,
+      "MARKET",
+      state.ri_sl_slices,
+      state.ri_sl_visible_count,
+      state.ri_sl_interval,
+      state.ri_sl_price_style,
+      state.ri_sl_limit_price,
+      state.ri_sl_price_low,
+      state.ri_sl_price_high,
+    ),
   };
 }
 
@@ -291,6 +439,7 @@ export function useOrderValidation(
       );
       if (sent.error) return { valid: false, errors: [sent.error] };
       input.totalAmount = sent.total;
+      if (state.position_action === "CLOSE") input.reduceOnly = true;
       const message = validateRangeIceberg(input);
       return { valid: message == null, errors: message ? [message] : [] };
     }
@@ -332,21 +481,91 @@ function baseAmountMessage(
 export function useOrderConfig(sizeRule: SizeRule | null = null, baseSymbol = "") {
   const [state, dispatch] = useReducer(orderReducer, undefined, loadSavedDefaults);
   const priceIncrement = sizeRule?.priceIncrement ?? 0;
+  const priceStamp = [
+    state.price,
+    state.ri_price_low,
+    state.ri_price_high,
+    state.ri_limit_price,
+    ...EXIT_PRICE_FIELDS.map((key) => state[key]),
+  ].join(",");
   useEffect(() => {
     if (!(priceIncrement > 0)) return;
     dispatch({ type: "QUANTIZE", increment: priceIncrement });
-  }, [priceIncrement, state.price, state.ri_price_low, state.ri_price_high, state.ri_limit_price]);
+  }, [priceIncrement, priceStamp]);
   const validation = useOrderValidation(state, sizeRule, baseSymbol);
 
   const chartProps: ChartPriceMapping = useMemo(() => {
     if (isRangeIceberg(state.execution_strategy)) {
       const upTo = state.ri_mode === "UP_TO";
-      const pick =
-        state.activePickField === "ri_price_high"
+      const field = state.activePickField;
+      const pick: PickSlot | null =
+        field === "ri_price_high"
           ? "end"
-          : state.activePickField === "ri_price_low" || state.activePickField === "ri_limit_price"
+          : field === "ri_price_low" || field === "ri_limit_price"
             ? "start"
-            : null;
+            : field && EXIT_PICK_FIELDS.has(field)
+              ? field
+              : null;
+      const reference = exitReference({
+        mode: state.ri_mode,
+        limitPrice: state.ri_limit_price,
+        priceLow: state.ri_price_low,
+        priceHigh: state.ri_price_high,
+      });
+      const side = state.side === 1 ? "BUY" : "SELL";
+      const extraLines: ExtraLine[] = [];
+      const addExitLine = (
+        enabled: boolean,
+        trigger: ExitTrigger,
+        percent: number,
+        price: number,
+        kind: "take_profit" | "stop_loss",
+        label: string,
+        color: string,
+        slot: string,
+      ) => {
+        if (!enabled || !reference) return;
+        const triggerPrice = exitTriggerPrice(side, kind, { trigger, percent, price }, reference.price);
+        if (triggerPrice == null || !(triggerPrice > 0)) return;
+        extraLines.push({
+          price: triggerPrice,
+          label,
+          color,
+          lineStyle: "dashed",
+          slot: trigger === "price" ? slot : undefined,
+        });
+      };
+      addExitLine(
+        state.ri_tp_enabled,
+        state.ri_tp_trigger,
+        state.ri_tp_percent,
+        state.ri_tp_price,
+        "take_profit",
+        "Take profit",
+        "#22c55e",
+        "ri_tp_price",
+      );
+      addExitLine(
+        state.ri_sl_enabled,
+        state.ri_sl_trigger,
+        state.ri_sl_percent,
+        state.ri_sl_price,
+        "stop_loss",
+        "Stop loss",
+        "#ef4444",
+        "ri_sl_price",
+      );
+      const lineLabels: NonNullable<ChartPriceMapping["lineLabels"]> = upTo
+        ? { start: "Limit" }
+        : { start: "Low", end: "High" };
+      lineLabels.ri_tp_price = "Take profit";
+      lineLabels.ri_tp_limit_price = "TP limit";
+      lineLabels.ri_tp_price_low = "TP low";
+      lineLabels.ri_tp_price_high = "TP high";
+      lineLabels.ri_sl_price = "Stop loss";
+      lineLabels.ri_sl_limit_price = "SL limit";
+      lineLabels.ri_sl_price_low = "SL low";
+      lineLabels.ri_sl_price_high = "SL high";
       return {
         startPrice: upTo ? state.ri_limit_price : state.ri_price_low,
         endPrice: upTo ? 0 : state.ri_price_high,
@@ -354,7 +573,8 @@ export function useOrderConfig(sizeRule: SizeRule | null = null, baseSymbol = ""
         side: state.side,
         minSpread: 0,
         activePickField: pick,
-        lineLabels: upTo ? { start: "Limit" } : { start: "Low", end: "High" },
+        extraLines: extraLines.length > 0 ? extraLines : undefined,
+        lineLabels,
       };
     }
     return {
@@ -380,6 +600,14 @@ export function useOrderConfig(sizeRule: SizeRule | null = null, baseSymbol = ""
     state.ri_price_low,
     state.ri_price_high,
     state.ri_limit_price,
+    state.ri_tp_enabled,
+    state.ri_tp_trigger,
+    state.ri_tp_percent,
+    state.ri_tp_price,
+    state.ri_sl_enabled,
+    state.ri_sl_trigger,
+    state.ri_sl_percent,
+    state.ri_sl_price,
   ]);
 
   const buildPayload = (
@@ -396,6 +624,8 @@ export function useOrderConfig(sizeRule: SizeRule | null = null, baseSymbol = ""
       input.priceLow = quantizePrice(input.priceLow, tick);
       input.priceHigh = quantizePrice(input.priceHigh, tick);
       input.limitPrice = quantizePrice(input.limitPrice, tick);
+      if (input.takeProfit) input.takeProfit = quantizeExit(input.takeProfit, tick);
+      if (input.stopLoss) input.stopLoss = quantizeExit(input.stopLoss, tick);
       if (state.position_action === "CLOSE") input.reduceOnly = true;
       const sent = icebergSentSize(
         input,
@@ -475,13 +705,17 @@ export function useOrderConfig(sizeRule: SizeRule | null = null, baseSymbol = ""
 
   const handleChartPriceSet = (field: PickSlot, price: number) => {
     if (isRangeIceberg(state.execution_strategy)) {
-      const key =
-        field === "end"
-          ? "ri_price_high"
-          : state.ri_mode === "UP_TO"
-            ? "ri_limit_price"
-            : "ri_price_low";
-      dispatch({ type: "SET_FIELD", field: key, value: price });
+      if (field === "start" || field === "end") {
+        const key =
+          field === "end"
+            ? "ri_price_high"
+            : state.ri_mode === "UP_TO"
+              ? "ri_limit_price"
+              : "ri_price_low";
+        dispatch({ type: "SET_FIELD", field: key, value: price });
+      } else if (EXIT_PICK_FIELDS.has(field)) {
+        dispatch({ type: "SET_FIELD", field, value: price });
+      }
     } else if (field === "start") {
       dispatch({ type: "SET_FIELD", field: "price", value: price });
     }
