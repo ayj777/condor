@@ -162,6 +162,7 @@ describe("range iceberg", () => {
       visible_count: 1,
       interval: "30s",
       limit_price: "0.07",
+      cap_behavior: "REST_AT_CAP",
     });
   });
 
@@ -212,8 +213,37 @@ describe("range iceberg", () => {
       visible_count: 2,
       price_low: "0.06",
       price_high: "0.075",
+      cap_behavior: "REST_AT_CAP",
     });
     expect(ranged.exit_arming).toBe("ON_FULL_FILL");
+  });
+
+  it("rests a stop loss iceberg at the cap when the entry is set to wait", () => {
+    const config = rangeIcebergConfig(
+      input({
+        capBehavior: "WAIT",
+        takeProfit: exit({
+          execution: "ICEBERG",
+          slices: 2,
+          visibleCount: 1,
+          priceStyle: "LIMIT",
+          limitPrice: 0.09,
+        }),
+        stopLoss: exit({
+          percent: 0.01,
+          execution: "ICEBERG",
+          slices: 4,
+          visibleCount: 1,
+          priceStyle: "LIMIT",
+          limitPrice: 0.07,
+        }),
+      }),
+      "mexc_perpetual",
+      "AIOT-USDT",
+    );
+    expect(config.cap_behavior).toBe("WAIT");
+    expect(config.stop_loss).toMatchObject({ cap_behavior: "REST_AT_CAP" });
+    expect(config.take_profit).not.toHaveProperty("cap_behavior");
   });
 
   it("previews long and short triggers from the limit", () => {
@@ -224,7 +254,13 @@ describe("range iceberg", () => {
     expect(exitTriggerPrice("BUY", "stop_loss", exit({ percent: 0.01 }), 0.08)).toBeCloseTo(0.0792);
     expect(exitTriggerPrice("SELL", "stop_loss", exit({ percent: 0.01 }), 0.08)).toBeCloseTo(0.0808);
     expect(exitPreviewText("take_profit", take, reference)).toBe(
-      "Long 0.0816, short 0.0784, from limit 0.08.",
+      "Estimate based on limit 0.08: long 0.0816, short 0.0784.",
+    );
+    expect(exitPreviewText("stop_loss", exit({ percent: 0.01 }), { price: 0.08, label: "range mid" })).toBe(
+      "Estimate based on range mid 0.08: long 0.0792, short 0.0808.",
+    );
+    expect(exitPreviewText("take_profit", exit({ trigger: "price", price: 0.09 }), reference)).toBe(
+      "Long 0.09, short 0.09.",
     );
     expect(exitPreviewText("take_profit", exit({ percent: 0 }), null)).toMatch(/entry or limit/);
   });
@@ -320,5 +356,87 @@ describe("range iceberg", () => {
         takeProfit: exit(),
       }),
     ).toMatch(/reduce only/);
+  });
+
+  it("rejects a stop loss iceberg whose limit or range is on the wrong side of the trigger", () => {
+    const up = input({ mode: "UP_TO", limitPrice: 0.08, duration: "", scheduleSlices: 0 });
+    const iceberg = {
+      percent: 0.01,
+      execution: "ICEBERG" as const,
+      slices: 2,
+      visibleCount: 1,
+    };
+    expect(
+      validateRangeIceberg({
+        ...up,
+        stopLoss: exit({ ...iceberg, priceStyle: "LIMIT", limitPrice: 0.09 }),
+      }),
+    ).toMatch(/limit must be at or below the trigger for a long/);
+    expect(
+      validateRangeIceberg({
+        ...up,
+        stopLoss: exit({ ...iceberg, priceStyle: "LIMIT", limitPrice: 0.0792 }),
+      }),
+    ).toBeNull();
+    expect(
+      validateRangeIceberg({
+        ...up,
+        stopLoss: exit({ ...iceberg, priceStyle: "RANGE", priceLow: 0.07, priceHigh: 0.085 }),
+      }),
+    ).toMatch(/price bounds must be at or below the trigger for a long/);
+    expect(
+      validateRangeIceberg({
+        ...up,
+        side: "SELL",
+        stopLoss: exit({ ...iceberg, priceStyle: "LIMIT", limitPrice: 0.07 }),
+      }),
+    ).toMatch(/limit must be at or above the trigger for a short/);
+    expect(
+      validateRangeIceberg({
+        ...up,
+        side: "SELL",
+        stopLoss: exit({ ...iceberg, priceStyle: "RANGE", priceLow: 0.07, priceHigh: 0.09 }),
+      }),
+    ).toMatch(/price bounds must be at or above the trigger for a short/);
+    expect(
+      validateRangeIceberg({
+        ...up,
+        side: "SELL",
+        stopLoss: exit({ ...iceberg, priceStyle: "LIMIT", limitPrice: 0.0808 }),
+      }),
+    ).toBeNull();
+    expect(
+      validateRangeIceberg({
+        ...up,
+        side: "SELL",
+        stopLoss: exit({ ...iceberg, priceStyle: "RANGE", priceLow: 0.081, priceHigh: 0.09 }),
+      }),
+    ).toBeNull();
+    expect(
+      validateRangeIceberg({
+        ...up,
+        stopLoss: exit({
+          trigger: "price",
+          price: 0.07,
+          execution: "ICEBERG",
+          slices: 2,
+          visibleCount: 1,
+          priceStyle: "LIMIT",
+          limitPrice: 0.075,
+        }),
+      }),
+    ).toMatch(/limit must be at or below the trigger for a long/);
+    expect(
+      validateRangeIceberg({
+        ...up,
+        takeProfit: exit({
+          execution: "ICEBERG",
+          slices: 2,
+          visibleCount: 1,
+          priceStyle: "LIMIT",
+          limitPrice: 0.09,
+        }),
+      }),
+    ).toBeNull();
   });
 });

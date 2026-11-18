@@ -213,6 +213,138 @@ describe("executor hover details", () => {
     expect(model.rows.map((row) => row.label)).not.toContain("Exit status");
     expect(model.rows.map((row) => row.label)).not.toContain("Realized PnL");
   });
+
+  it("labels a resting limit take profit without treating it as triggered", () => {
+    const model = executorHoverModel(
+      executor({
+        timestamp: 0,
+        pnl: 0,
+        config: { mode: "UP_TO", limit_price: 0.08, take_profit: { percent: "0.02" } },
+        custom_info: {
+          exit_state: "RESTING",
+          exit_status: "executing",
+          exit_active: "take_profit",
+          take_profit_trigger_price: "0.0825",
+          filled_amount: "12000",
+          filled_base: "12000",
+          open_base: "12000",
+          closed_base: "0",
+          exchange_stop_order_id: "exch-stop-44",
+          exit_order_ids: ["tp-a", "tp-b"],
+        },
+      }),
+    );
+    expect(model.rows.find((row) => row.label === "Exit status")?.value).toBe("TP resting");
+    expect(model.rows.find((row) => row.label === "Exit")).toBeUndefined();
+    expect(model.rows.map((row) => row.value)).not.toContain("Executing");
+    expect(model.rows.map((row) => row.value)).not.toContain("Take Profit");
+    // 2% of the 0.08 limit would be 0.0816. The card shows the executor price.
+    expect(model.rows.find((row) => row.label === "TP trigger")?.value).toBe("0.0825");
+    expect(model.rows.find((row) => row.label === "Open")?.value).toBe("12,000 AIOT");
+    expect(model.rows.find((row) => row.label === "Exchange stop")?.value).toBe("In place");
+    expect(model.rows.find((row) => row.label === "Exit orders")?.value).toBe("2");
+    const dumped = JSON.stringify(model);
+    expect(dumped).not.toContain("exch-stop-44");
+    expect(dumped).not.toContain("tp-a");
+    expect(dumped).not.toContain("0.0816");
+  });
+
+  it("uses distinct exit_state labels and names the exit only after it starts", () => {
+    const cases = [
+      ["ARMED", "Armed", false],
+      ["TRIGGERED", "Triggered", true],
+      ["CLOSING", "Closing", true],
+      ["DONE", "Done", true],
+    ] as const;
+    for (const [state, label, showKind] of cases) {
+      const model = executorHoverModel(
+        executor({
+          timestamp: 0,
+          pnl: 0,
+          custom_info: {
+            exit_state: state,
+            exit_status: "executing",
+            exit_active: "take_profit",
+            open_base: state === "DONE" ? "0" : "4",
+          },
+        }),
+      );
+      expect(model.rows.find((row) => row.label === "Exit status")?.value).toBe(label);
+      expect(model.rows.find((row) => row.label === "Exit")?.value).toBe(
+        showKind ? "Take Profit" : undefined,
+      );
+      expect(model.rows.map((row) => row.value)).not.toContain("Executing");
+    }
+  });
+
+  it("ignores a stale executing status when exit_state is none", () => {
+    const model = executorHoverModel(
+      executor({
+        timestamp: 0,
+        pnl: 0,
+        custom_info: {
+          exit_state: "NONE",
+          exit_status: "executing",
+          exit_active: "take_profit",
+        },
+      }),
+    );
+    expect(model.rows.map((row) => row.label)).not.toContain("Exit status");
+    expect(model.rows.map((row) => row.label)).not.toContain("Exit");
+  });
+
+  it("does not invent a trigger from the limit when the executor has not sent one", () => {
+    const model = executorHoverModel(
+      executor({
+        timestamp: 0,
+        pnl: 0,
+        config: {
+          mode: "UP_TO",
+          limit_price: 0.08,
+          take_profit: { percent: "0.02", execution: "SINGLE", order_type: "LIMIT" },
+        },
+        custom_info: {
+          exit_state: "ARMED",
+          filled_base: "100",
+          open_base: "100",
+        },
+      }),
+    );
+    expect(model.rows.find((row) => row.label === "Exit status")?.value).toBe("Armed");
+    expect(model.rows.find((row) => row.label === "TP trigger")).toBeUndefined();
+    expect(model.rows.find((row) => row.label === "Open")?.value).toBe("100 AIOT");
+    expect(JSON.stringify(model)).not.toContain("0.0816");
+  });
+
+  it("reads filled_base when filled_amount is absent and prefers closed_base", () => {
+    const sized = executorHoverModel(
+      executor({
+        timestamp: 0,
+        pnl: 0,
+        config: { total_amount: 1000, size_unit: "BASE" },
+        custom_info: { filled_base: "250" },
+      }),
+    );
+    expect(sized.rows.find((row) => row.label === "Size")?.value).toBe("1,000 AIOT, 250 filled (25.0%)");
+
+    const closing = executorHoverModel(
+      executor({
+        timestamp: 0,
+        pnl: 0,
+        custom_info: {
+          exit_state: "CLOSING",
+          exit_active: "stop_loss",
+          closed_base: "40",
+          exit_filled_amount: "10",
+          open_base: "60",
+        },
+      }),
+    );
+    expect(closing.rows.find((row) => row.label === "Exit filled")?.value).toBe("40 AIOT");
+    expect(closing.rows.find((row) => row.label === "Exit status")?.value).toBe("Closing");
+    expect(closing.rows.find((row) => row.label === "Exit")?.value).toBe("Stop Loss");
+    expect(closing.rows.find((row) => row.label === "Open")?.value).toBe("60 AIOT");
+  });
 });
 
 describe("placePopup", () => {

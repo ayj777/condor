@@ -78,8 +78,10 @@ describe("order config exits", () => {
     setField("ri_sl_limit_price", 0.07);
     setField("ri_exit_arming", "ON_ANY_FILL");
 
+    setField("ri_cap_behavior", "WAIT");
     expect(latest.validation.valid).toBe(true);
     expect(latest.buildPayload("mexc_perpetual", "AIOT-USDT", true).config).toMatchObject({
+      cap_behavior: "WAIT",
       exit_arming: "ON_ANY_FILL",
       take_profit: { percent: "0.02", execution: "SINGLE", order_type: "LIMIT" },
       stop_loss: {
@@ -89,8 +91,27 @@ describe("order config exits", () => {
         visible_count: 1,
         interval: "30s",
         limit_price: "0.07",
+        cap_behavior: "REST_AT_CAP",
       },
     });
+  });
+
+  it("rejects a long stop loss iceberg whose limit sits above the trigger", () => {
+    setField("execution_strategy", "RANGE_ICEBERG");
+    setField("ri_mode", "UP_TO");
+    setField("ri_limit_price", 0.08);
+    setField("ri_total_amount", 100);
+    setField("ri_duration", "");
+    setField("ri_schedule_slices", 0);
+    setField("ri_sl_enabled", true);
+    setField("ri_sl_percent", 0.01);
+    setField("ri_sl_execution", "ICEBERG");
+    setField("ri_sl_slices", 2);
+    setField("ri_sl_visible_count", 1);
+    setField("ri_sl_price_style", "LIMIT");
+    setField("ri_sl_limit_price", 0.09);
+    expect(latest.validation.valid).toBe(false);
+    expect(latest.validation.errors.join(" ")).toMatch(/at or below the trigger for a long/);
   });
 
   it("blocks a reduce-only close that also sets an exit", () => {

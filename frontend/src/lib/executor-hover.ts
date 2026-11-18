@@ -204,7 +204,7 @@ export function executorHoverModel(executor: ExecutorInfo, now = Date.now()): Ex
 
   const unit = sizeUnitSymbol(text(first(cfg, info, ["size_unit"])), executor.trading_pair);
   const total = num(pick(cfg, ["total_amount"]) ?? pick(info, ["target_amount"]) ?? pick(cfg, ["amount"]));
-  const filled = num(pick(info, ["filled_amount"]));
+  const filled = num(pick(info, ["filled_amount", "filled_base"]));
   const amountText = (amount: number) => (unit ? `${formatTokenAmount(amount)} ${unit}` : formatTokenAmount(amount));
   if (total != null && total > 0) {
     const pct = filled != null && filled >= 0 ? ` (${((filled / total) * 100).toFixed(1)}%)` : "";
@@ -297,11 +297,34 @@ function quotePnl(value: number): string {
   return text;
 }
 
+const EXIT_STATE_LABELS: Record<string, string> = {
+  ARMED: "Armed",
+  RESTING: "TP resting",
+  TRIGGERED: "Triggered",
+  CLOSING: "Closing",
+  DONE: "Done",
+};
+
+function stateToken(value: unknown): string {
+  return text(value).replace(/^.*\./, "").replace(/[-.\s]/g, "_").toUpperCase();
+}
+
+function idCount(value: unknown): number {
+  if (Array.isArray(value)) return value.map((item) => text(item)).filter(Boolean).length;
+  return text(value) ? 1 : 0;
+}
+
 /**
  * Exit progress from a range iceberg `custom_info`.
  *
- * Idle with no trigger and no fill is left out, so an order that never armed
- * an exit does not grow a row of zeros.
+ * `exit_state` is the source of the status label when the executor sends it:
+ * a resting limit take profit stays "TP resting" instead of looking triggered.
+ * Older executors still use `exit_status` and `exit_active`. Idle with no
+ * trigger and no fill is left out, so an order that never armed an exit does
+ * not grow a row of zeros.
+ *
+ * Trigger prices are the executor's own numbers. A percent on the form is only
+ * an estimate from the limit or the range mid, so this card does not recompute one.
  */
 function addExitRows(rows: HoverRow[], info: Record<string, unknown>, pair: string) {
   const add = (label: string, value: string) => {
@@ -309,27 +332,60 @@ function addExitRows(rows: HoverRow[], info: Record<string, unknown>, pair: stri
   };
   const tpTrigger = num(info.take_profit_trigger_price);
   const slTrigger = num(info.stop_loss_trigger_price);
-  const status = text(info.exit_status).toLowerCase();
+  const legacyStatus = text(info.exit_status).toLowerCase();
   const active = text(info.exit_active).toLowerCase();
-  const filled = num(info.exit_filled_amount);
+  const closed = num(pick(info, ["closed_base", "exit_filled_amount"]));
   const average = num(info.exit_average_price);
   const pnl = num(info.realized_pnl_quote);
+  const openBase = num(info.open_base);
+  const stateKey = stateToken(info.exit_state);
+  const hasExitState = stateKey !== "";
+  const stateLabel =
+    EXIT_STATE_LABELS[stateKey] ?? (hasExitState && stateKey !== "NONE" ? pretty(stateKey) : "");
+  const exchangeStop = text(info.exchange_stop_order_id) !== "";
+  const exitOrders = idCount(info.exit_order_ids);
+
   const hasTrigger = (tpTrigger != null && tpTrigger > 0) || (slTrigger != null && slTrigger > 0);
-  const hasFill = filled != null && filled > 0;
-  const moving = status !== "" && status !== "idle";
-  if (!hasTrigger && !hasFill && !moving && !active) return;
+  const hasFill = closed != null && closed > 0;
+  const hasOpen = openBase != null && openBase > 0;
+  const legacyMoving = legacyStatus !== "" && legacyStatus !== "idle";
+  const stateMoving = stateLabel !== "";
+  const flatDone = stateKey === "DONE" && openBase === 0;
+  const reported =
+    hasTrigger || hasFill || stateMoving || hasOpen || exchangeStop || exitOrders > 0 || flatDone;
+  if (hasExitState) {
+    if (!reported) return;
+  } else if (!reported && !legacyMoving && !active) {
+    return;
+  }
 
   const [base, quote] = (pair || "").split("-");
+  const amountText = (amount: number) => {
+    const formatted = formatTokenAmount(amount);
+    return base ? `${formatted} ${base}` : formatted;
+  };
+  // Prices the executor is using. A percent stays absent until a fill exists,
+  // because the executor measures it from the average fill. This card does not
+  // estimate one from the limit or the range mid.
   if (tpTrigger != null && tpTrigger > 0) add("TP trigger", priceText(tpTrigger));
   if (slTrigger != null && slTrigger > 0) add("SL trigger", priceText(slTrigger));
-  if (status && (status !== "idle" || hasTrigger || hasFill || active)) add("Exit status", pretty(status));
-  if (active) add("Exit", pretty(active));
-  if (filled != null && filled > 0) {
-    const amount = formatTokenAmount(filled);
-    add("Exit filled", base ? `${amount} ${base}` : amount);
+  if (hasExitState) {
+    if (stateLabel) add("Exit status", stateLabel);
+    const started = stateKey === "TRIGGERED" || stateKey === "CLOSING" || stateKey === "DONE";
+    if (started && active) add("Exit", pretty(active));
+  } else {
+    if (legacyStatus && (legacyStatus !== "idle" || hasTrigger || hasFill || active)) {
+      add("Exit status", pretty(legacyStatus));
+    }
+    if (active) add("Exit", pretty(active));
   }
+  if (hasOpen || (openBase === 0 && stateKey === "DONE")) add("Open", amountText(openBase ?? 0));
+  if (hasFill && closed != null) add("Exit filled", amountText(closed));
+  if (exchangeStop) add("Exchange stop", "In place");
+  if (exitOrders > 0) add("Exit orders", String(exitOrders));
   if (average != null && average > 0) add("Exit avg", priceText(average));
-  if (pnl != null && (hasFill || moving || active)) {
+  const showPnl = hasExitState ? hasFill || stateMoving || hasOpen || exchangeStop : hasFill || legacyMoving || active;
+  if (pnl != null && showPnl) {
     add("Realized PnL", quote ? `${quotePnl(pnl)} ${quote}` : quotePnl(pnl));
   }
 }

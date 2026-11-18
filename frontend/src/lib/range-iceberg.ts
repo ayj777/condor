@@ -150,7 +150,10 @@ export function decimalString(value: number): string {
   return String(Number(value.toPrecision(12)));
 }
 
-/** The price a percent trigger is measured from: the limit, or the range mid. */
+/**
+ * Price a percent preview is estimated from: the limit, or the range mid.
+ * The executor measures a percent from the average fill, which can differ.
+ */
 export function exitReference(
   input: Pick<RangeIcebergInput, "mode" | "limitPrice" | "priceLow" | "priceHigh">,
 ): { price: number; label: string } | null {
@@ -190,22 +193,29 @@ export function formatTriggerPrice(price: number): string {
   return String(precise);
 }
 
-/** Live long and short triggers from the entry or limit price. */
+/**
+ * Long and short triggers for the form.
+ * A percent is an estimate based on the limit or the range mid. An absolute
+ * price is the trigger itself.
+ */
 export function exitPreviewText(
   kind: ExitKind,
   exit: RangeIcebergExitInput,
   reference: { price: number; label: string } | null,
 ): string {
   if (!reference) return "Set the entry or limit price to preview the trigger.";
-  const from = `from ${reference.label} ${formatTriggerPrice(reference.price)}`;
+  const basis = `${reference.label} ${formatTriggerPrice(reference.price)}`;
   const long = exitTriggerPrice("BUY", kind, exit, reference.price);
   const short = exitTriggerPrice("SELL", kind, exit, reference.price);
   if (long == null || short == null) {
     return exit.trigger === "percent"
-      ? `Enter a percent to preview the trigger ${from}.`
-      : `Enter a price to preview the trigger ${from}.`;
+      ? `Enter a percent to preview an estimate based on ${basis}.`
+      : "Enter a price to preview the trigger.";
   }
-  return `Long ${formatTriggerPrice(long)}, short ${formatTriggerPrice(short)}, ${from}.`;
+  if (exit.trigger === "percent") {
+    return `Estimate based on ${basis}: long ${formatTriggerPrice(long)}, short ${formatTriggerPrice(short)}.`;
+  }
+  return `Long ${formatTriggerPrice(long)}, short ${formatTriggerPrice(short)}.`;
 }
 
 function wholeCount(value: number): boolean {
@@ -272,6 +282,45 @@ function validateExit(
   } else if (exit.priceLow > exit.priceHigh) {
     return `${label} price low must be at or below price high`;
   }
+  if (kind === "stop_loss") {
+    const trigger = exit.trigger === "price"
+      ? exit.price
+      : reference != null
+        ? exitTriggerPrice(side, kind, exit, reference)
+        : null;
+    if (trigger != null && trigger > 0) {
+      const bounds = stopBoundsMessage(exit, side, trigger);
+      if (bounds) return bounds;
+    }
+  }
+  return null;
+}
+
+/**
+ * A long stop sells at or below its trigger. A short stop buys at or above it.
+ * A bound on the other side would rest through the trigger.
+ */
+function stopBoundsMessage(
+  exit: RangeIcebergExitInput,
+  side: "BUY" | "SELL",
+  trigger: number,
+): string | null {
+  const long = side === "BUY";
+  const slack = Math.max(Math.abs(trigger) * 1e-6, 1e-10);
+  const onSide = (price: number) => (long ? price <= trigger + slack : price >= trigger - slack);
+  const direction = long ? "at or below" : "at or above";
+  const which = long ? "long" : "short";
+  if (exit.priceStyle === "LIMIT") {
+    if (exit.limitPrice > 0 && !onSide(exit.limitPrice)) {
+      return `Stop loss limit must be ${direction} the trigger for a ${which}`;
+    }
+    return null;
+  }
+  const lowOff = exit.priceLow > 0 && !onSide(exit.priceLow);
+  const highOff = exit.priceHigh > 0 && !onSide(exit.priceHigh);
+  if (lowOff || highOff) {
+    return `Stop loss price bounds must be ${direction} the trigger for a ${which}`;
+  }
   return null;
 }
 
@@ -325,6 +374,8 @@ function exitPayload(kind: ExitKind, exit: RangeIcebergExitInput): Record<string
     body.price_low = decimalString(exit.priceLow);
     body.price_high = decimalString(exit.priceHigh);
   }
+  // A stop iceberg rests at its own cap. The entry WAIT setting does not apply.
+  if (kind === "stop_loss") body.cap_behavior = "REST_AT_CAP";
   return body;
 }
 
