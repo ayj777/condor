@@ -225,11 +225,13 @@ export function executorHoverModel(
   const mode = modeRaw ? modeLabel(modeRaw) : "";
   if (mode) add("Mode", mode);
 
-  const sizeUnitRaw = icebergSizeUnitRaw({ config: cfg, custom_info: info });
+  const rangeIceberg = (executor.type || "").toLowerCase().includes("range_iceberg");
+  const sizeUnitRaw = rangeIceberg
+    ? icebergSizeUnitRaw({ config: cfg, custom_info: info }) || "QUOTE"
+    : text(first(cfg, info, ["size_unit"]));
   const unit = sizeUnitSymbol(sizeUnitRaw, executor.trading_pair);
   const { quote } = pairTokens(executor.trading_pair);
   const sizePrice = referenceSizePrice([info, cfg, { current_price: executor.current_price }], markPrice);
-  const rangeIceberg = (executor.type || "").toLowerCase().includes("range_iceberg");
   const inBase = sizeShownInBase(sizeUnitRaw, rangeIceberg ? "iceberg" : "order");
   const total = num(pick(cfg, ["total_amount"]) ?? pick(info, ["target_amount"]) ?? pick(cfg, ["amount"]));
   const filled = num(pick(info, ["filled_amount", "filled_base"]));

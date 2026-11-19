@@ -61,7 +61,7 @@ function tierPrice(value: number): string {
   return raw.replace(/(\.\d*?)0+$/, "$1").replace(/\.$/, "");
 }
 
-/** A live size unit wins. A resumed iceberg can be base while config still says quote. */
+/** A live size unit wins. A resumed iceberg can be base while config still says quote. An absent unit is quote. */
 export function icebergSizeUnitRaw(source: {
   config?: Record<string, unknown> | null;
   custom_info?: Record<string, unknown> | null;
@@ -108,7 +108,7 @@ export function rangeIcebergTierFacts(ex: {
   }
   const total = tierNumber(cfg.total_amount ?? info.target_amount);
   if (total != null && total > 0) {
-    const unit = sizeUnitSymbol(icebergSizeUnitRaw(ex), ex.trading_pair);
+    const unit = sizeUnitSymbol(icebergSizeUnitRaw(ex) || "QUOTE", ex.trading_pair);
     const text = formatTokenAmount(total);
     rows.push({ label: "Total", value: unit ? `${text} ${unit}` : text });
   }

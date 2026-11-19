@@ -435,6 +435,10 @@ describe("executor hover details", () => {
       config: { mode: "UP_TO", limit_price: 0.1, total_amount: 1000, size_unit: "QUOTE", duration: "1h", group_id: "tier-a" },
       custom_info: { size_unit: "BASE", sibling_base: "500" },
     });
+    expect(rangeIcebergTierLine(executor({
+      config: { mode: "UP_TO", limit_price: 0.1, total_amount: 1000, duration: "1h", group_id: "tier-a" },
+      custom_info: { sibling_base: "500" },
+    }))).toContain("1,000 USDT");
     expect(rangeIcebergTierLine(resumed)).toContain("1,000 AIOT");
     expect(executorHoverModel(resumed).rows.find((row) => row.label === "Size")?.value).toContain("1,000 AIOT");
 
