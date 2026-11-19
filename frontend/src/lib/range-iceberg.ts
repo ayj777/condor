@@ -379,6 +379,19 @@ function exitPayload(kind: ExitKind, exit: RangeIcebergExitInput): Record<string
   return body;
 }
 
+/** The exit object a range iceberg create or edit sends. */
+export function rangeIcebergExitConfig(
+  kind: ExitKind,
+  exit: RangeIcebergExitInput,
+): Record<string, unknown> {
+  return exitPayload(kind, exit);
+}
+
+/** Take profit and stop loss rules, without the entry fields around them. */
+export function validateRangeIcebergExits(input: RangeIcebergInput): string | null {
+  return validateExits(input);
+}
+
 /** The first rule the config would reject, or null when the create can proceed. */
 export function validateRangeIceberg(input: RangeIcebergInput): string | null {
   if (!(input.totalAmount > 0)) return "Total amount is required";

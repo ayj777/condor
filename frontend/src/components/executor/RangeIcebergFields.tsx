@@ -93,7 +93,7 @@ function exitDraft(state: OrderState, prefix: ExitPrefix): RangeIcebergExitInput
   };
 }
 
-function ExitEditor({
+export function ExitEditor({
   title,
   kind,
   prefix,
