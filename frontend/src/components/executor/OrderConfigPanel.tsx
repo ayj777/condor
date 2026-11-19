@@ -2,7 +2,6 @@ import { useEffect } from "react";
 import { Sparkles } from "lucide-react";
 
 import {
-  AmountField,
   LeverageField,
   NumberField,
   PercentPresets,
@@ -15,7 +14,7 @@ import {
 import type { ExecutorValidation } from "./types";
 import { usesLimitPrice, type OrderAction, type OrderState } from "./order-config";
 import { RangeIcebergFields } from "./RangeIcebergFields";
-import { floorBaseAmount, formatTokenAmount, legalBaseAmount, orderStep, percentBase, quoteTogglePrice, roundDownNote, type SizeRule } from "@/lib/order-size";
+import { approximateQuoteLabel, formatTokenAmount, orderStep, plainOrderPrice, plainOrderSentSize, plainOrderSummary, roundDownNote, sizeUnitChoices, sizedPercent, type SizeRule } from "@/lib/order-size";
 import { fallbackStrategy } from "@/lib/order-strategy";
 import { bookForOrder, isHedge, isLongSide, orderCap, positionModeLabel, reducesOpen, resultingSize, sideOptions, type HedgeBooks, type OpenBook } from "@/lib/trade-guards";
 
@@ -148,37 +147,55 @@ export function OrderConfigPanel({
   const isChaser = allowed && state.execution_strategy === "LIMIT_CHASER";
   const isRange = lockStrategy || (allowed && state.execution_strategy === "RANGE_ICEBERG");
 
-  // The amount is always in base units, but which balance funds it is not: a spot
-  // BUY spends quote and has to be divided by the price to become base, a spot
-  // SELL spends the base itself. A perp buys margin with quote either way, and the
-  // position it opens is that margin times the leverage.
+  // Which balance funds the order is not the unit the field shows. A spot BUY
+  // spends quote, a spot SELL spends base. A perp spends quote margin either
+  // way, and the position it opens is that margin times the leverage. The
+  // field itself is quote (USDT) unless the user switches it to the base token.
   const sizingPrice = needsPrice && state.price > 0 ? state.price : currentPrice;
+  const orderPrice = plainOrderPrice(state.execution_strategy, state.price, currentPrice);
   const spendsBase = isSpot && state.side === 2;
   const spendable = spendsBase ? baseAvailable : quoteAvailable;
   const spendSymbol = spendsBase ? displayBase : displayQuote;
-  const canSize = spendsBase || (!!sizingPrice && sizingPrice > 0);
+  const quoteMode = state.amount_unit === "QUOTE";
+  const canSize = spendable != null && (
+    quoteMode
+      ? (!spendsBase || (!!sizingPrice && sizingPrice > 0))
+      : (spendsBase || (!!sizingPrice && sizingPrice > 0))
+  );
+  const sizeCap = orderCap(positionMode, books, openBook ?? null, state.position_action, state.side);
+  const symbols = { base: displayBase, quote: displayQuote };
+  const sent = plainOrderSentSize(state.amount, state.amount_unit, orderPrice, sizeRule, sizeCap, symbols);
+  const summary = plainOrderSummary(state.amount, state.amount_unit, sent, symbols);
+  const requestedBase = quoteMode
+    ? (orderPrice && orderPrice > 0 ? state.amount / orderPrice : 0)
+    : state.amount;
+  const rounded = sent.error ? null : roundDownNote(requestedBase, sent.base, displayBase);
+  const unitSymbol = quoteMode ? displayQuote : displayBase;
 
   const pickPercent = (pct: number) => {
     if (spendable === null || spendable <= 0) return;
-    const spend = spendable * pct;
     const usedLeverage =
       !isSpot && positionLeverage != null && positionLeverage >= 1
         ? positionLeverage
         : state.leverage;
-    const stepped = spendsBase
-      ? (sizeRule ? floorBaseAmount(spend, sizeRule.increment) : spend)
-      : percentBase(spendable, pct, sizingPrice as number, isSpot ? 1 : usedLeverage, sizeRule?.increment ?? 0);
-    dispatch({ type: "SET_FIELD", field: "amount", value: Number(stepped.toPrecision(8)) });
+    const next = sizedPercent({
+      unit: state.amount_unit,
+      spendable,
+      pct,
+      price: sizingPrice,
+      leverage: isSpot ? 1 : usedLeverage,
+      spendsBase,
+      increment: sizeRule?.increment ?? 0,
+    });
+    if (next == null) return;
+    dispatch({ type: "SET_FIELD", field: "amount", value: next });
   };
-  const snapped = sizeRule ? legalBaseAmount(state.amount, sizeRule) : state.amount;
-  const rounded = roundDownNote(state.amount, snapped, displayBase);
   const hedge = isHedge(positionMode);
   const sizeBook = bookForOrder(positionMode, books, openBook, state.side);
-  const belowMin =
-    !!sizeRule &&
-    sizeRule.minOrderSize > 0 &&
-    state.amount > 0 &&
-    snapped < sizeRule.minOrderSize;
+  const belowMin = !!sent.error && sent.error.startsWith("Minimum order size");
+  const minimumQuote = sizeRule && orderPrice && orderPrice > 0
+    ? approximateQuoteLabel(sizeRule.minOrderSize, orderPrice, displayQuote)
+    : "";
 
   return (
     <div className="flex flex-col gap-4 overflow-y-auto p-3">
@@ -202,50 +219,64 @@ export function OrderConfigPanel({
         <SectionHeader>Order</SectionHeader>
         {!isRange && (
         <div>
-          <AmountField
+          <NumberField
+            label={unitSymbol ? `Amount (${unitSymbol})` : "Amount"}
             value={state.amount}
             field="amount"
             dispatch={dispatch}
-            currentPrice={quoteTogglePrice(state.price, currentPrice, usesLimitPrice(state.execution_strategy))}
-            step={sizeRule && sizeRule.increment > 0 ? sizeRule.increment : 0.001}
-            baseSymbol={displayBase}
-            quoteSymbol={displayQuote}
+            step={state.amount_unit === "BASE" && sizeRule && sizeRule.increment > 0 ? sizeRule.increment : 0.001}
+            min={0}
           />
-          {usesLimitPrice(state.execution_strategy) && state.price > 0 && (
+          <SelectField
+            label="Size unit"
+            value={state.amount_unit}
+            field="amount_unit"
+            dispatch={dispatch}
+            options={sizeUnitChoices(displayBase, displayQuote)}
+          />
+          {quoteMode && usesLimitPrice(state.execution_strategy) && state.price > 0 && (
             <p className="mt-1 text-[10px] text-[var(--color-text-muted)]">
               A quote amount uses this limit price, so the quote you type is the quote the order spends.
             </p>
           )}
-          {sizeRule && sizeRule.minOrderSize > 0 && (
+          {sizeRule && state.amount_unit === "BASE" && sizeRule.minOrderSize > 0 && (
             <p className="mt-1 text-[10px] text-[var(--color-text-muted)]">
-              Step {formatTokenAmount(orderStep(sizeRule) || sizeRule.minOrderSize)}{displayBase ? ` ${displayBase}` : ""}. Minimum {formatTokenAmount(sizeRule.minOrderSize)}.
+              Step {formatTokenAmount(orderStep(sizeRule) || sizeRule.minOrderSize)}{displayBase ? ` ${displayBase}` : ""}. Minimum {formatTokenAmount(sizeRule.minOrderSize)}{minimumQuote ? ` (${minimumQuote})` : ""}.
             </p>
+          )}
+          {summary && (
+            <p className="mt-1 text-[10px] text-[var(--color-text-muted)]">{summary}</p>
+          )}
+          {sent.error && state.amount > 0 && (
+            <p className="mt-1 text-[10px] text-[var(--color-red)]">{sent.error}</p>
           )}
           {rounded && (
             <p className="mt-1 text-[10px] text-[var(--color-text-muted)]">{rounded}</p>
           )}
-          {snapped > 0 && (sizeBook?.amount || (hedge && state.position_action !== "CLOSE")) ? (
+          {sent.base > 0 && (sizeBook?.amount || (hedge && state.position_action !== "CLOSE")) ? (
             <p className="mt-1 text-[10px] text-[var(--color-text-muted)]">
               After this order the {hedge ? (isLongSide(state.side) ? "long" : "short") : "position"} is {resultingSize(
                 sizeBook?.amount ?? 0,
-                snapped,
+                sent.base,
                 hedge ? state.position_action === "CLOSE" : state.position_action === "CLOSE" || reducesOpen(state.side, openBook, positionMode),
               )} {displayBase}.
             </p>
           ) : null}
-          {belowMin && (
+          {belowMin && sizeRule && (
             <button
               type="button"
               onClick={() =>
                 dispatch({
                   type: "SET_FIELD",
                   field: "amount",
-                  value: sizeRule!.minOrderSize,
+                  value: quoteMode && orderPrice && orderPrice > 0
+                    ? Number((sizeRule.minOrderSize * orderPrice).toPrecision(8))
+                    : sizeRule.minOrderSize,
                 })
               }
               className="mt-1 text-[10px] text-[var(--color-primary)] hover:underline"
             >
-              Use minimum ({sizeRule!.minOrderSize} {displayBase})
+              Use minimum ({sizeRule.minOrderSize} {displayBase}{minimumQuote ? `, ${minimumQuote}` : ""})
             </button>
           )}
           <PercentPresets

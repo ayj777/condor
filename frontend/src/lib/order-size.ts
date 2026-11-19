@@ -28,6 +28,229 @@ export function quoteTogglePrice(
   return midPrice;
 }
 
+/**
+ * The price a plain market or limit order converts with.
+ *
+ * A limit uses its limit price and does not fall back to the mid: the base
+ * size has to match the price the order will rest at. A market or a chaser
+ * uses the current mid or last price.
+ */
+export function plainOrderPrice(
+  strategy: string,
+  limitPrice: number,
+  midPrice: number | null,
+): number | null {
+  if (strategy === "LIMIT" || strategy === "LIMIT_MAKER") {
+    return limitPrice > 0 ? limitPrice : null;
+  }
+  return midPrice != null && midPrice > 0 ? midPrice : null;
+}
+
+export interface PlainOrderSent {
+  /** Base size that will be sent, after the step and the max-size clamp. */
+  base: number;
+  /** Quote value of that base size, when a price is known. */
+  quote: number | null;
+  error: string | null;
+}
+
+/**
+ * The base size a single market or limit order will send.
+ *
+ * Quote is divided by `price` first. The result is clamped to `maxBase` and
+ * then floored to the pair's size step, the same floor a range iceberg uses
+ * for one slice. A quote size with no price is not sent.
+ */
+export function plainOrderSentSize(
+  amount: number,
+  unit: "BASE" | "QUOTE",
+  price: number | null,
+  rule: SizeRule | null | undefined,
+  maxBase = 0,
+  symbols: { base?: string; quote?: string } = {},
+): PlainOrderSent {
+  const baseSymbol = symbols.base ?? "";
+  const quoteSymbol = symbols.quote ?? "";
+  if (!(amount > 0)) return { base: 0, quote: null, error: "Amount required" };
+  let base = amount;
+  if (unit === "QUOTE") {
+    if (!(price != null && price > 0)) {
+      return {
+        base: 0,
+        quote: null,
+        error: "A price is required to convert quote size into the base token",
+      };
+    }
+    base = amount / price;
+  }
+  if (maxBase > 0 && base > maxBase) base = maxBase;
+  const sent = legalBaseAmount(base, rule);
+  const min = rule?.minOrderSize ?? 0;
+  const quote = price != null && price > 0 && sent > 0
+    ? Number((sent * price).toPrecision(12))
+    : null;
+  if (!(sent > 0) || (min > 0 && sent < min)) {
+    return {
+      base: sent,
+      quote,
+      error: minimumOrderMessage(min > 0 ? min : 0, baseSymbol, price, quoteSymbol),
+    };
+  }
+  return { base: sent, quote, error: null };
+}
+
+function minimumOrderMessage(
+  min: number,
+  baseSymbol: string,
+  price: number | null,
+  quoteSymbol: string,
+): string {
+  const baseText = [String(min), baseSymbol].filter(Boolean).join(" ");
+  const note = approximateQuoteLabel(min, price, quoteSymbol);
+  return note
+    ? `Minimum order size is ${baseText} (${note})`
+    : `Minimum order size is ${baseText}`;
+}
+
+/**
+ * One line for the amount the user typed and the base size that will be sent.
+ *
+ * Quote mode leads with the typed quote and the base equivalent. Base mode
+ * leads with the base size and, when a price is known, its approximate quote.
+ */
+export function plainOrderSummary(
+  typed: number,
+  unit: "BASE" | "QUOTE",
+  sent: PlainOrderSent,
+  symbols: { base?: string; quote?: string },
+): string | null {
+  if (sent.error || !(sent.base > 0)) return null;
+  const baseText = [formatTokenAmount(sent.base), symbols.base || ""].filter(Boolean).join(" ");
+  if (unit === "QUOTE") {
+    const typedText = [formatTokenAmount(typed), symbols.quote || ""].filter(Boolean).join(" ");
+    const drifted = sent.quote != null
+      && symbols.quote
+      && Math.abs(sent.quote - typed) > Math.max(1e-8, Math.abs(typed) * 1e-6);
+    const approx = drifted ? ` (approx ${formatTokenAmount(sent.quote as number)} ${symbols.quote})` : "";
+    return `${typedText}, about ${baseText}${approx}`;
+  }
+  const note = approximateQuoteLabel(sent.base, sent.quote != null && sent.base > 0 ? sent.quote / sent.base : null, symbols.quote || "");
+  return note ? `${baseText} (${note})` : baseText;
+}
+
+/** `approx 3.2 USDT`, or empty when the price or the quote ticker is missing. */
+export function approximateQuoteLabel(
+  base: number,
+  price: number | null | undefined,
+  quote: string,
+): string {
+  if (!(base > 0) || price == null || !(price > 0) || !quote || !Number.isFinite(base) || !Number.isFinite(price)) {
+    return "";
+  }
+  const quoteAmount = Number((base * price).toPrecision(12));
+  return `approx ${formatTokenAmount(quoteAmount)} ${quote}`;
+}
+
+/** The base text plus its approximate quote, when that quote can be priced. */
+export function withApproximateQuote(
+  text: string,
+  base: number,
+  price: number | null | undefined,
+  quote: string,
+): string {
+  const note = approximateQuoteLabel(base, price, quote);
+  return note ? `${text} (${note})` : text;
+}
+
+/**
+ * Price for a displayed base size.
+ *
+ * An average fill wins. With no fill price, the executor's own mid or the
+ * page mid is used. A limit on the order is not treated as a fill.
+ */
+export function referenceSizePrice(
+  sources: Array<Record<string, unknown> | null | undefined>,
+  mark?: number | null,
+): number | null {
+  const averages = [
+    "average_fill_price",
+    "avg_fill_price",
+    "average_filled_price",
+    "average_entry_price",
+    "current_position_average_price",
+  ];
+  for (const key of averages) {
+    const value = firstPositive(sources, key);
+    if (value != null) return value;
+  }
+  for (const key of ["current_price", "mid_price", "mark_price"]) {
+    const value = firstPositive(sources, key);
+    if (value != null) return value;
+  }
+  return mark != null && mark > 0 ? mark : null;
+}
+
+function firstPositive(
+  sources: Array<Record<string, unknown> | null | undefined>,
+  key: string,
+): number | null {
+  for (const source of sources) {
+    if (!source || !Object.prototype.hasOwnProperty.call(source, key)) continue;
+    const value = Number(source[key]);
+    if (Number.isFinite(value) && value > 0) return value;
+  }
+  return null;
+}
+
+/**
+ * True when the size on screen is a count of the base token.
+ *
+ * An iceberg with no stored unit is quote, which is the executor default.
+ * A single order with no stored unit is base.
+ */
+export function sizeShownInBase(unit: string, kind: "iceberg" | "order"): boolean {
+  const key = unit.replace(/[\s._-]/g, "").toUpperCase();
+  if (key === "QUOTE" || key === "CONTRACTS") return false;
+  if (key === "BASE") return true;
+  return kind === "order";
+}
+
+/**
+ * The amount a percent-of-balance button writes into the field.
+ *
+ * Quote mode stores quote, so a quote balance is used directly (times
+ * leverage on a perp) and a base balance is priced into quote. Base mode
+ * still returns a floored base size. Null means the price that conversion
+ * needs is missing.
+ */
+export function sizedPercent(args: {
+  unit: "BASE" | "QUOTE";
+  spendable: number;
+  pct: number;
+  price: number | null;
+  leverage: number;
+  spendsBase: boolean;
+  increment: number;
+}): number | null {
+  const { unit, spendable, pct, price, leverage, spendsBase, increment } = args;
+  if (!(spendable > 0) || !(pct > 0)) return null;
+  const lev = leverage >= 1 ? leverage : 1;
+  if (unit === "QUOTE") {
+    if (spendsBase) {
+      if (!(price != null && price > 0)) return null;
+      return Number((spendable * pct * price).toPrecision(8));
+    }
+    return Number((spendable * pct * lev).toPrecision(8));
+  }
+  if (spendsBase) {
+    const spend = spendable * pct;
+    const stepped = increment > 0 ? floorBaseAmount(spend, increment) : spend;
+    return Number(stepped.toPrecision(8));
+  }
+  if (!(price != null && price > 0)) return null;
+  return percentBase(spendable, pct, price, lev, increment);
+}
+
 /** Nearest multiple of `increment`. An absent step returns `amount` unchanged. */
 export function snapBaseAmount(amount: number, increment: number): number {
   if (!(amount > 0) || !(increment > 0) || !Number.isFinite(amount)) return amount > 0 ? amount : 0;

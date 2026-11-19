@@ -15,7 +15,7 @@ import {
   pnlTextClass,
   isExecutorActive,
 } from "@/lib/formatters";
-import { childOrderIds, executorRunDetail, executorTypeLabel } from "@/lib/executor-run";
+import { childOrderIds, executorBaseSizeNote, executorRunDetail, executorTypeLabel } from "@/lib/executor-run";
 import { ExecutorHoverRow } from "@/components/trade/ExecutorDetailPopup";
 import { stopKeepCopy } from "@/lib/executorStopCopy";
 import { rangeIcebergEditable } from "@/lib/range-iceberg-edit";
@@ -54,6 +54,8 @@ interface TradeBottomPaneProps {
   quoteSymbol?: string;
   selectedExecutorId?: string | null;
   onExecutorSelect?: (executor: ExecutorInfo | null) => void;
+  /** Mid or last price, used to label a base size with an approximate quote. */
+  markPrice?: number | null;
   /** Working orders for this market. Off for venues with no order book. */
   showOrders?: boolean;
 }
@@ -132,6 +134,7 @@ export function TradeBottomPane({
   selectedExecutorId,
   onExecutorSelect,
   showOrders = false,
+  markPrice = null,
 }: TradeBottomPaneProps) {
   const { server } = useServer();
   const queryClient = useQueryClient();
@@ -482,6 +485,7 @@ export function TradeBottomPane({
                         <ExecutorHoverRow
                           key={ex.id}
                           executor={ex}
+                          markPrice={markPrice}
                           className={`border-b border-[var(--color-border)]/30 transition-colors ${
                             isSelected
                               ? "bg-[var(--color-primary)]/10 hover:bg-[var(--color-primary)]/15"
@@ -515,6 +519,7 @@ export function TradeBottomPane({
                           <td className="px-3 py-1.5">
                             {(() => {
                               const detail = executorRunDetail(ex);
+                              const sizeNote = executorBaseSizeNote(ex, markPrice);
                               return (
                                 <div className="flex flex-col gap-0.5">
                                   {active ? (
@@ -530,6 +535,7 @@ export function TradeBottomPane({
                                   {detail.filled && (
                                     <span className="font-mono text-[9px] text-[var(--color-text-muted)]">
                                       filled {detail.filled}
+                                      {sizeNote ? ` (${sizeNote})` : ""}
                                     </span>
                                   )}
                                   {detail.halt && (
@@ -778,6 +784,7 @@ export function TradeBottomPane({
         <RangeIcebergEditDialog
           key={editTarget.id}
           executor={editTarget}
+          markPrice={markPrice}
           pending={editMutation.isPending}
           error={editError}
           onClose={() => {

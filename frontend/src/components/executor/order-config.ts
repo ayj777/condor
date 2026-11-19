@@ -6,9 +6,14 @@
 import { useEffect, useMemo, useReducer } from "react";
 
 import type { ChartPriceMapping, ExecutorValidation, ExtraLine, PickSlot } from "./types";
-import { loadPersistedDefaults, savePersistedDefaults } from "./persisted-defaults";
+import { loadPersistedDefaults } from "./persisted-defaults";
 import { ORDER_DEFAULTS_KEY } from "@/lib/sessionState";
-import { legalBaseAmount, quantizePrice, type SizeRule } from "@/lib/order-size";
+import {
+  plainOrderPrice,
+  plainOrderSentSize,
+  quantizePrice,
+  type SizeRule,
+} from "@/lib/order-size";
 import {
   exitReference,
   exitTriggerPrice,
@@ -29,6 +34,8 @@ import { marginForOpen } from "@/lib/trade-guards";
 export interface OrderState {
   side: 1 | 2;
   amount: number;
+  /** Unit of `amount` for a market or limit order. Quote is the USDT size. */
+  amount_unit: "BASE" | "QUOTE";
   execution_strategy: string;
   price: number;
   leverage: number;
@@ -129,6 +136,7 @@ export type OrderAction =
 export const ORDER_DEFAULTS: OrderState = {
   side: 1,
   amount: 0,
+  amount_unit: "QUOTE",
   execution_strategy: "LIMIT",
   price: 0,
   leverage: 1,
@@ -142,8 +150,10 @@ export const ORDER_DEFAULTS: OrderState = {
   anchored: false,
   ri_mode: "RANGE",
   ri_total_amount: 0,
-  // The connector converts base size by the contract size. The form speaks base.
-  ri_size_unit: "BASE",
+  // Quote (USDT) is the size the form starts in. The connector still turns a
+  // base size into contracts. A saved BASE from before quote was the default
+  // is read back as quote. An explicit base choice after that is kept.
+  ri_size_unit: "QUOTE",
   ri_price_low: 0,
   ri_price_high: 0,
   ri_limit_price: 0,
@@ -202,8 +212,11 @@ export const ORDER_DEFAULTS: OrderState = {
 
 const STORAGE_KEY = ORDER_DEFAULTS_KEY;
 
+/** Bumped when quote replaced base as the default size unit. */
+export const ORDER_SIZE_UNIT_VERSION = 2;
+
 const PERSISTED_FIELDS: (keyof OrderState)[] = [
-  "side", "amount", "execution_strategy", "leverage",
+  "side", "amount", "amount_unit", "execution_strategy", "leverage",
   "chaser_distance", "chaser_refresh_threshold", "position_action",
   "ri_mode", "ri_total_amount", "ri_size_unit", "ri_iceberg", "ri_visible_count",
   "ri_levels", "ri_duration", "ri_schedule_slices", "ri_schedule_interval",
@@ -211,14 +224,50 @@ const PERSISTED_FIELDS: (keyof OrderState)[] = [
   "ri_distribution", "ri_weight", "ri_post_only", "ri_min_order_interval",
 ];
 
+function readSavedBlob(): Record<string, unknown> | null {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return null;
+    const saved = JSON.parse(raw) as unknown;
+    if (!saved || typeof saved !== "object" || Array.isArray(saved)) return null;
+    return saved as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
 function loadSavedDefaults(): OrderState {
+  const saved = readSavedBlob();
   const loaded = loadPersistedDefaults(STORAGE_KEY, ORDER_DEFAULTS, PERSISTED_FIELDS);
-  if (loaded.ri_size_unit !== "QUOTE") loaded.ri_size_unit = "BASE";
+  const version = Number(saved?.size_unit_version ?? 0);
+  if (!(version >= ORDER_SIZE_UNIT_VERSION)) {
+    // Before this version the form forced BASE, so a stored BASE is that default.
+    loaded.ri_size_unit = "QUOTE";
+    loaded.amount_unit = "QUOTE";
+  } else {
+    loaded.ri_size_unit = loaded.ri_size_unit === "BASE" ? "BASE" : "QUOTE";
+    loaded.amount_unit = loaded.amount_unit === "BASE" ? "BASE" : "QUOTE";
+  }
   return loaded;
 }
 
 function saveDefaults(state: OrderState) {
-  savePersistedDefaults(STORAGE_KEY, state, PERSISTED_FIELDS);
+  const toSave: Record<string, unknown> = { size_unit_version: ORDER_SIZE_UNIT_VERSION };
+  for (const key of PERSISTED_FIELDS) toSave[key] = state[key];
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(toSave));
+}
+
+/** Remember an explicit base or quote choice without rewriting the rest of the form. */
+function persistSizeUnits(sizeUnit: OrderState["ri_size_unit"], amountUnit: OrderState["amount_unit"]) {
+  const saved = readSavedBlob() ?? {};
+  saved.size_unit_version = ORDER_SIZE_UNIT_VERSION;
+  saved.ri_size_unit = sizeUnit;
+  saved.amount_unit = amountUnit;
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(saved));
+  } catch {
+    // A remembered unit is a convenience. A denied store does not block the form.
+  }
 }
 
 function clearedPrices(state: OrderState): OrderState {
@@ -251,8 +300,14 @@ export function orderReducer(state: OrderState, action: OrderAction): OrderState
       if (action.field === "ri_size_unit") {
         return {
           ...state,
-          ri_size_unit: action.value === "QUOTE" ? "QUOTE" : "BASE",
+          ri_size_unit: action.value === "BASE" ? "BASE" : "QUOTE",
           ri_contracts_confirmed: false,
+        };
+      }
+      if (action.field === "amount_unit") {
+        return {
+          ...state,
+          amount_unit: action.value === "BASE" ? "BASE" : "QUOTE",
         };
       }
       return { ...state, [action.field]: action.value };
@@ -424,6 +479,8 @@ export function useOrderValidation(
   state: OrderState,
   sizeRule: SizeRule | null = null,
   baseSymbol = "",
+  quoteSymbol = "",
+  midPrice: number | null = null,
 ): ExecutorValidation {
   return useMemo(() => {
     if (state.leverage < 1) {
@@ -444,8 +501,15 @@ export function useOrderValidation(
       return { valid: message == null, errors: message ? [message] : [] };
     }
     const errors: string[] = [];
-    const sized = baseAmountMessage(state.amount, sizeRule, baseSymbol);
-    if (sized) errors.push(sized);
+    const sized = plainOrderSentSize(
+      state.amount,
+      state.amount_unit,
+      plainOrderPrice(state.execution_strategy, state.price, midPrice),
+      sizeRule,
+      0,
+      { base: baseSymbol, quote: quoteSymbol },
+    );
+    if (sized.error) errors.push(sized.error);
     if (usesLimitPrice(state.execution_strategy) && state.price <= 0) {
       errors.push("Price required for limit orders");
     }
@@ -454,7 +518,7 @@ export function useOrderValidation(
       if (state.chaser_refresh_threshold <= 0) errors.push("Chaser refresh threshold required");
     }
     return { valid: errors.length === 0, errors };
-  }, [state, sizeRule, baseSymbol]);
+  }, [state, sizeRule, baseSymbol, quoteSymbol, midPrice]);
 }
 
 function conversionPrice(state: OrderState): number {
@@ -462,23 +526,14 @@ function conversionPrice(state: OrderState): number {
   return Math.max(state.ri_price_low, state.ri_price_high);
 }
 
-function baseAmountMessage(
-  amount: number,
-  rule: SizeRule | null,
-  baseSymbol: string,
-): string | null {
-  if (!(amount > 0)) return "Amount required";
-  if (!rule || !(rule.minOrderSize > 0)) return null;
-  const snapped = legalBaseAmount(amount, rule);
-  if (snapped < rule.minOrderSize) {
-    return `Minimum order size is ${rule.minOrderSize} ${baseSymbol}`;
-  }
-  return null;
-}
-
 // ── Hook ──
 
-export function useOrderConfig(sizeRule: SizeRule | null = null, baseSymbol = "") {
+export function useOrderConfig(
+  sizeRule: SizeRule | null = null,
+  baseSymbol = "",
+  quoteSymbol = "",
+  midPrice: number | null = null,
+) {
   const [state, dispatch] = useReducer(orderReducer, undefined, loadSavedDefaults);
   const priceIncrement = sizeRule?.priceIncrement ?? 0;
   const priceStamp = [
@@ -492,7 +547,10 @@ export function useOrderConfig(sizeRule: SizeRule | null = null, baseSymbol = ""
     if (!(priceIncrement > 0)) return;
     dispatch({ type: "QUANTIZE", increment: priceIncrement });
   }, [priceIncrement, priceStamp]);
-  const validation = useOrderValidation(state, sizeRule, baseSymbol);
+  const validation = useOrderValidation(state, sizeRule, baseSymbol, quoteSymbol, midPrice);
+  useEffect(() => {
+    persistSizeUnits(state.ri_size_unit, state.amount_unit);
+  }, [state.ri_size_unit, state.amount_unit]);
 
   const chartProps: ChartPriceMapping = useMemo(() => {
     if (isRangeIceberg(state.execution_strategy)) {
@@ -659,13 +717,20 @@ export function useOrderConfig(sizeRule: SizeRule | null = null, baseSymbol = ""
       };
     }
 
-    let amount = legalBaseAmount(state.amount, sizeRule);
-    if (maxBase > 0 && amount > maxBase) amount = legalBaseAmount(maxBase, sizeRule);
+    const sent = plainOrderSentSize(
+      state.amount,
+      state.amount_unit,
+      plainOrderPrice(state.execution_strategy, state.price, midPrice),
+      sizeRule,
+      maxBase,
+      { base: baseSymbol, quote: quoteSymbol },
+    );
+    if (sent.error) throw new Error(sent.error);
     const config: Record<string, unknown> = {
       connector_name: connector,
       trading_pair: pair,
       side: state.side,
-      amount,
+      amount: sent.base,
       leverage: isSpot ? 1 : state.leverage,
       execution_strategy: state.execution_strategy,
     };

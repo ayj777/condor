@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { baseAmountError, floorBaseAmount, formatTokenAmount, legalBaseAmount, percentBase, quantizePrice, roundDownNote, sizeUnitChoices, sizeUnitSymbol, snapBaseAmount } from "./order-size";
+import { baseAmountError, floorBaseAmount, formatTokenAmount, legalBaseAmount, percentBase, plainOrderPrice, plainOrderSentSize, plainOrderSummary, quantizePrice, roundDownNote, sizeUnitChoices, sizeUnitSymbol, sizedPercent, snapBaseAmount } from "./order-size";
 
 const AIOT = { minOrderSize: 10, increment: 10 };
 
@@ -58,5 +58,74 @@ describe("MEXC base size step", () => {
   it("leaves a venue with no step alone", () => {
     expect(legalBaseAmount(0.015, null)).toBe(0.015);
     expect(baseAmountError(0.015, null, "BTC")).toBeNull();
+  });
+});
+
+describe("plain order quote size", () => {
+  it("converts USDT at the limit price and floors to the size step", () => {
+    expect(plainOrderPrice("LIMIT", 0.08, 0.1)).toBe(0.08);
+    expect(plainOrderPrice("LIMIT", 0, 0.1)).toBeNull();
+    expect(plainOrderPrice("MARKET", 0.08, 0.1)).toBe(0.1);
+    const sent = plainOrderSentSize(100, "QUOTE", 0.081, AIOT, 0, { base: "AIOT", quote: "USDT" });
+    expect(sent.error).toBeNull();
+    expect(sent.base).toBe(1230);
+    expect(sent.quote).toBeCloseTo(1230 * 0.081, 8);
+    expect(plainOrderSummary(100, "QUOTE", sent, { base: "AIOT", quote: "USDT" })).toBe(
+      "100 USDT, about 1,230 AIOT (approx 99.63 USDT)",
+    );
+  });
+
+  it("converts a market order at the mid and blocks when no price is known", () => {
+    const sent = plainOrderSentSize(80, "QUOTE", plainOrderPrice("MARKET", 0, 0.08), AIOT, 0, {
+      base: "AIOT",
+      quote: "USDT",
+    });
+    expect(sent.base).toBe(1000);
+    expect(sent.error).toBeNull();
+    const blocked = plainOrderSentSize(80, "QUOTE", plainOrderPrice("MARKET", 0, null), AIOT, 0, {
+      base: "AIOT",
+      quote: "USDT",
+    });
+    expect(blocked.base).toBe(0);
+    expect(blocked.error).toBe("A price is required to convert quote size into the base token");
+    expect(plainOrderSentSize(10, "QUOTE", null, AIOT).error).toMatch(/price is required/i);
+  });
+
+  it("clamps to the max base size and names the minimum in both units", () => {
+    const clamped = plainOrderSentSize(100, "QUOTE", 0.08, AIOT, 500, { base: "AIOT", quote: "USDT" });
+    expect(clamped.base).toBe(500);
+    expect(clamped.error).toBeNull();
+    const tiny = plainOrderSentSize(0.5, "QUOTE", 0.08, AIOT, 0, { base: "AIOT", quote: "USDT" });
+    expect(tiny.error).toBe("Minimum order size is 10 AIOT (approx 0.8 USDT)");
+  });
+
+  it("writes a percent as quote in USDT mode and as base otherwise", () => {
+    expect(sizedPercent({
+      unit: "QUOTE",
+      spendable: 1000,
+      pct: 0.25,
+      price: 0.08,
+      leverage: 2,
+      spendsBase: false,
+      increment: 10,
+    })).toBe(500);
+    expect(sizedPercent({
+      unit: "BASE",
+      spendable: 1000,
+      pct: 1,
+      price: 0.08,
+      leverage: 2,
+      spendsBase: false,
+      increment: 10,
+    })).toBe(25000);
+    expect(sizedPercent({
+      unit: "QUOTE",
+      spendable: 100,
+      pct: 0.5,
+      price: null,
+      leverage: 1,
+      spendsBase: true,
+      increment: 10,
+    })).toBeNull();
   });
 });
