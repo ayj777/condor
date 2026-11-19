@@ -231,6 +231,41 @@ describe("range iceberg edit dialog", () => {
     expect(submitted[0]).not.toHaveProperty("slice_amount");
   });
 
+  it("keeps save off when another open iceberg already uses this stop", () => {
+    const submitted: Record<string, unknown>[] = [];
+    render(
+      <RangeIcebergEditDialog
+        executor={executor({
+          config: {
+            mode: "UP_TO",
+            total_amount: 100,
+            limit_price: 0.1,
+            stop_loss: { price: "0.07", execution: "SINGLE", order_type: "MARKET" },
+          },
+        })}
+        peers={[{
+          type: "range_iceberg_executor",
+          side: "BUY",
+          status: "running",
+          trading_pair: "AIOT-USDT",
+          config: { stop_loss: { price: "0.07", execution: "SINGLE" } },
+          custom_info: {},
+        }]}
+        pending={false}
+        error={null}
+        onClose={() => {}}
+        onSubmit={(body) => submitted.push(body)}
+      />,
+    );
+    expect(container.textContent).toContain("409");
+    expect(container.textContent).toContain("Create stays off");
+    const save = [...container.querySelectorAll("button")].find((el) => el.textContent === "Save");
+    expect(save).toBeInstanceOf(HTMLButtonElement);
+    expect((save as HTMLButtonElement).disabled).toBe(true);
+    click("Save");
+    expect(submitted).toEqual([]);
+  });
+
   it("shows the 409 reason in the error toast as the API sent it", () => {
     const error = "A range iceberg is already open on AIOT-USDT BUY for master_account (executor hidden-id). Close it first.";
     render(

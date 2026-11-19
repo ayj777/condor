@@ -804,6 +804,7 @@ export function TradeBottomPane({
           key={editTarget.id}
           executor={editTarget}
           markPrice={markPrice}
+          peers={executors.filter((ex) => ex.id !== editTarget.id)}
           pending={editMutation.isPending}
           error={editError}
           onClose={() => {

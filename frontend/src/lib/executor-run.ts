@@ -61,6 +61,17 @@ function tierPrice(value: number): string {
   return raw.replace(/(\.\d*?)0+$/, "$1").replace(/\.$/, "");
 }
 
+/** A live size unit wins. A resumed iceberg can be base while config still says quote. */
+export function icebergSizeUnitRaw(source: {
+  config?: Record<string, unknown> | null;
+  custom_info?: Record<string, unknown> | null;
+}): string {
+  const info = source.custom_info ?? {};
+  const cfg = source.config ?? {};
+  const live = tierText(info.size_unit);
+  return live || tierText(cfg.size_unit);
+}
+
 function tierText(value: unknown): string {
   if (value == null) return "";
   const raw = String(value).trim();
@@ -97,7 +108,7 @@ export function rangeIcebergTierFacts(ex: {
   }
   const total = tierNumber(cfg.total_amount ?? info.target_amount);
   if (total != null && total > 0) {
-    const unit = sizeUnitSymbol(String(cfg.size_unit ?? info.size_unit ?? ""), ex.trading_pair);
+    const unit = sizeUnitSymbol(icebergSizeUnitRaw(ex), ex.trading_pair);
     const text = formatTokenAmount(total);
     rows.push({ label: "Total", value: unit ? `${text} ${unit}` : text });
   }
@@ -190,7 +201,7 @@ export function executorBaseSizeNote(ex: ExecutorInfo, mark?: number | null): st
   const info = (ex.custom_info ?? {}) as Record<string, unknown>;
   const cfg = (ex.config ?? {}) as Record<string, unknown>;
   const iceberg = (ex.type || "").toLowerCase().includes("range_iceberg");
-  const unit = String(cfg.size_unit ?? info.size_unit ?? "");
+  const unit = icebergSizeUnitRaw(ex);
   if (!sizeShownInBase(unit, iceberg ? "iceberg" : "order")) return "";
   const filled = Number(info.filled_base ?? info.filled_amount);
   if (!(filled > 0)) return "";
