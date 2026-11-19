@@ -187,15 +187,40 @@ describe("iceberg form defaults", () => {
     expect(migrated.ri_iceberg).toBe(true);
   });
 
-  it("keeps an explicit iceberg off after the default changed", () => {
+  it("turns a saved iceberg checkbox off into the strategy default", () => {
     localStorage.setItem(ORDER_DEFAULTS_KEY, JSON.stringify({
       size_unit_version: ORDER_SIZE_UNIT_VERSION,
-      form_defaults_version: FORM_DEFAULTS_VERSION,
+      form_defaults_version: 3,
       ri_iceberg: false,
+      ri_visible_count: 1,
       ri_size_unit: "QUOTE",
     }));
     render();
-    expect(latest.state.ri_iceberg).toBe(false);
+    expect(latest.state.ri_iceberg).toBe(true);
+    expect(latest.state.ri_visible_count).toBe(1);
+    const migrated = JSON.parse(localStorage.getItem(ORDER_DEFAULTS_KEY) ?? "{}") as Record<string, unknown>;
+    expect(migrated.form_defaults_version).toBe(FORM_DEFAULTS_VERSION);
+    expect(migrated.ri_iceberg).toBe(true);
+  });
+
+  it("sends iceberg true and one visible order when the strategy is selected", () => {
+    render();
+    act(() => {
+      latest.dispatch({ type: "SET_FIELD", field: "execution_strategy", value: "RANGE_ICEBERG" });
+      latest.dispatch({ type: "SET_FIELD", field: "ri_iceberg", value: false });
+      latest.dispatch({ type: "SET_FIELD", field: "ri_mode", value: "UP_TO" });
+      latest.dispatch({ type: "SET_FIELD", field: "ri_limit_price", value: 63790.4 });
+      latest.dispatch({ type: "SET_FIELD", field: "ri_total_amount", value: 100 });
+      latest.dispatch({ type: "SET_FIELD", field: "ri_size_unit", value: "QUOTE" });
+      latest.dispatch({ type: "SET_FIELD", field: "ri_duration", value: "10m" });
+      latest.dispatch({ type: "SET_FIELD", field: "ri_schedule_interval", value: "1m" });
+      latest.dispatch({ type: "SET_FIELD", field: "ri_visible_count", value: 1 });
+    });
+    const payload = latest.buildPayload("mexc_perpetual", "BTC-USDT", true);
+    expect(payload.executor_type).toBe("range_iceberg_executor");
+    expect(payload.config.iceberg).toBe(true);
+    expect(payload.config.visible_count).toBe(1);
+    expect(payload.config.schedule_interval).toBe("1m");
   });
 
   it("keeps first fill for a saved duration that never chose a start", () => {

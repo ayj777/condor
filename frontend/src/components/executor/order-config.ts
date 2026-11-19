@@ -220,13 +220,13 @@ const STORAGE_KEY = ORDER_DEFAULTS_KEY;
 export const ORDER_SIZE_UNIT_VERSION = 2;
 
 /**
- * Bumped when iceberg defaults on and jitter is stored as a fraction shown
- * as a percent. A saved form from before this version turns iceberg on.
- * A saved duration with no schedule start keeps First fill, which is what
- * those orders did. A value above 1 was typed into the old unlabeled jitter
- * field as a percent, so it is divided by 100 and capped at 100%.
+ * Bumped when the Iceberg strategy became the only iceberg control.
+ * A saved form from before this version turns iceberg on, including one that
+ * had unchecked the old box. A saved duration with no schedule start keeps
+ * First fill. A jitter value above 1 was typed as a percent, so it is
+ * divided by 100 and capped at 100%.
  */
-export const FORM_DEFAULTS_VERSION = 3;
+export const FORM_DEFAULTS_VERSION = 4;
 
 const JITTER_FIELDS = [
   "ri_size_jitter_pct",
@@ -287,8 +287,9 @@ function migrateFormDefaults(
   loaded: OrderState,
 ): OrderState {
   const formVersion = Number(saved?.form_defaults_version ?? 0);
+  // The Iceberg choice is the flag. A saved checkbox off is turned on.
+  loaded.ri_iceberg = true;
   if (!(formVersion >= FORM_DEFAULTS_VERSION)) {
-    loaded.ri_iceberg = true;
     const duration = String(saved?.ri_duration ?? loaded.ri_duration ?? "").trim();
     if (duration && (saved == null || saved.ri_schedule_start == null)) {
       loaded.ri_schedule_start = "FIRST_FILL";
@@ -503,7 +504,8 @@ export function rangeIcebergInput(state: OrderState): RangeIcebergInput {
     priceLow: state.ri_price_low,
     priceHigh: state.ri_price_high,
     limitPrice: state.ri_limit_price,
-    iceberg: state.ri_iceberg,
+    // The strategy dropdown is the iceberg. The old checkbox is gone.
+    iceberg: true,
     visibleCount: state.ri_visible_count,
     levels: state.ri_levels,
     duration: state.ri_duration,

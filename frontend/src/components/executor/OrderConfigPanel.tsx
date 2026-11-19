@@ -25,7 +25,7 @@ const STRATEGY_OPTIONS = [
   { value: "LIMIT", label: "Limit" },
   { value: "LIMIT_MAKER", label: "Limit Maker" },
   { value: "LIMIT_CHASER", label: "Limit Chaser" },
-  { value: "RANGE_ICEBERG", label: "Range Iceberg" },
+  { value: "RANGE_ICEBERG", label: "Iceberg" },
 ];
 
 const POSITION_ACTION_OPTIONS = [

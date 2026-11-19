@@ -190,6 +190,24 @@ export function restingOrderText(count: number): string {
   return count === 1 ? "1 order can rest at once." : `${count} orders can rest at once.`;
 }
 
+/**
+ * What the Iceberg strategy places.
+ *
+ * `visible_count` 1 is one working order. A later schedule window only adds
+ * size to the queue until that order fills. A larger count is how many may
+ * rest together.
+ */
+export function oneAtATimeText(visibleCount: number, duration: string, interval: string): string {
+  const count = Math.max(1, Math.trunc(visibleCount) || 1);
+  const body = count === 1
+    ? "One order at a time. The next is placed after the previous one fills."
+    : `${count} orders at a time. The next is placed after one of them fills.`;
+  const seconds = duration.trim() ? parseDuration(duration) : null;
+  const every = interval.trim() ? parseDuration(interval) : null;
+  if (seconds == null || every == null || scheduleSliceCount(seconds, every) == null) return body;
+  return `${body} A new share is released every ${formatInterval(every)}.`;
+}
+
 export function scheduleStartLine(start: ScheduleStart): string {
   return start === "FIRST_FILL"
     ? "The clock starts at the first fill. Until then only the first release is placed."

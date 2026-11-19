@@ -13,6 +13,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { RangeIcebergFields } from "./RangeIcebergFields";
+import { OrderConfigPanel } from "./OrderConfigPanel";
 import { ORDER_DEFAULTS, type OrderAction, type OrderState } from "./order-config";
 
 declare global {
@@ -141,13 +142,49 @@ describe("range iceberg exits", () => {
     expect(container.querySelector('button[aria-label="Order type"]')).toBeNull();
   });
 
-  it("hides visible count until iceberg is on and says how many orders can rest", () => {
-    render({ ri_iceberg: true, ri_visible_count: 2, ri_levels: 10 });
-    expect(container.textContent).toContain("Visible count");
-    expect(container.textContent).toContain("2 orders can rest at once");
-    render({ ri_iceberg: false, ri_levels: 10, ri_duration: "", ri_schedule_interval: "" });
-    expect(container.textContent).not.toContain("Visible count");
-    expect(container.textContent).toContain("10 orders can rest at once");
+  it("has no iceberg checkbox and says one order fills before the next", () => {
+    render({ ri_iceberg: false, ri_visible_count: 1, ri_duration: "10m", ri_schedule_interval: "1m" });
+    const icebergBox = [...container.querySelectorAll("label")].find(
+      (el) => el.querySelector("span")?.textContent === "Iceberg" && el.querySelector("input[type='checkbox']"),
+    );
+    expect(icebergBox).toBeUndefined();
+    expect(container.textContent).toContain(
+      "One order at a time. The next is placed after the previous one fills. A new share is released every 1m.",
+    );
+    expect(container.textContent).not.toContain("orders shown at once");
+    const advanced = [...container.querySelectorAll("button")].find((el) => el.textContent === "Advanced");
+    act(() => advanced?.click());
+    expect(container.textContent).toContain("orders shown at once");
+  });
+
+  it("maps the Iceberg dropdown to that form and keeps a single control", () => {
+    const state: OrderState = { ...ORDER_DEFAULTS, execution_strategy: "RANGE_ICEBERG" };
+    act(() => {
+      root.render(
+        <OrderConfigPanel
+          state={state}
+          dispatch={(action) => dispatched.push(action)}
+          validation={{ valid: true, errors: [] }}
+          currentPrice={63790.4}
+          connector="mexc_perpetual"
+          pair="BTC-USDT"
+          baseSymbol="BTC"
+          quoteSymbol="USDT"
+        />,
+      );
+    });
+    const strategy = container.querySelector('button[aria-label="Execution Strategy"]');
+    expect(strategy?.textContent).toContain("Iceberg");
+    expect(strategy?.textContent).not.toContain("Range");
+    const icebergBox = [...container.querySelectorAll("label")].find(
+      (el) => el.querySelector("span")?.textContent === "Iceberg" && el.querySelector("input[type='checkbox']"),
+    );
+    expect(icebergBox).toBeUndefined();
+    expect(container.textContent).toContain("One order at a time. The next is placed after the previous one fills.");
+    act(() => (strategy as HTMLButtonElement).click());
+    const options = [...document.querySelectorAll('[role="option"]')].map((el) => el.textContent ?? "");
+    expect(options.filter((label) => label.includes("Iceberg"))).toHaveLength(1);
+    expect(options.some((label) => /ladder/i.test(label))).toBe(false);
   });
 
   it("shows schedule start and expiry only with the duration", () => {
