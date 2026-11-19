@@ -224,6 +224,37 @@ export function entryPause(source: {
   return { paused: true, reason };
 }
 
+function exitConfigured(value: unknown): boolean {
+  if (value == null || value === "" || value === false) return false;
+  if (typeof value === "number") return value > 0;
+  if (typeof value === "string") {
+    const text = value.trim();
+    if (!text || text === "null" || text === "None") return false;
+    const n = Number(text);
+    return Number.isFinite(n) ? n > 0 : true;
+  }
+  if (typeof value === "object" && !Array.isArray(value)) {
+    const row = value as Record<string, unknown>;
+    return exitConfigured(row.price) || exitConfigured(row.percent);
+  }
+  return false;
+}
+
+/** True when this iceberg actually has a take profit or a stop loss. */
+export function icebergHasExits(source: {
+  config?: Record<string, unknown> | null;
+  custom_info?: Record<string, unknown> | null;
+}): boolean {
+  const info = source.custom_info ?? {};
+  const cfg = source.config ?? {};
+  return (
+    exitConfigured(info.take_profit_trigger_price) ||
+    exitConfigured(info.stop_loss_trigger_price) ||
+    exitConfigured(cfg.take_profit ?? info.take_profit) ||
+    exitConfigured(cfg.stop_loss ?? info.stop_loss)
+  );
+}
+
 /** Filled size, halt reason, and whether resume is meaningful for this row. */
 export function executorRunDetail(ex: ExecutorInfo): {
   filled: string | null;

@@ -1,5 +1,5 @@
 import type { ExecutorInfo } from "./api";
-import { entryPause, executorTypeLabel, rangeIcebergMode, rangeIcebergTierFacts } from "./executor-run";
+import { entryPause, executorTypeLabel, icebergHasExits, rangeIcebergMode, rangeIcebergTierFacts } from "./executor-run";
 import { escapeHtml, formatPriceSig } from "./formatters";
 import {
   approximateQuoteLabel,
@@ -834,7 +834,7 @@ export function renderOverlayTooltipHtml(
     }
     if (pause.paused) {
       addRow("Paused", pause.reason || "entry paused");
-      addRow("Exits", "TP and SL active", green);
+      if (icebergHasExits({ config: cfg, custom_info: info })) addRow("Exits", "TP and SL active", green);
     }
     if (info.unknown_order_halt === true) {
       const reason = typeof info.status_reason === "string" && info.status_reason

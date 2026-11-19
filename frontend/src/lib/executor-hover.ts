@@ -1,6 +1,6 @@
 import type { ExecutorInfo } from "@/lib/api";
 import { formatPriceSig } from "@/lib/formatters";
-import { entryPause, executorConfigEdit, executorTypeLabel, icebergSizeUnitRaw, rangeIcebergTierFacts } from "@/lib/executor-run";
+import { entryPause, executorConfigEdit, executorTypeLabel, icebergHasExits, icebergSizeUnitRaw, rangeIcebergTierFacts } from "@/lib/executor-run";
 import {
   approximateQuoteLabel,
   formatTokenAmount,
@@ -326,7 +326,7 @@ export function executorHoverModel(
   const pause = entryPause(executor);
   if (pause.paused) {
     add("Paused", pause.reason || "entry paused");
-    add("Exits", "TP and SL active");
+    if (icebergHasExits(executor)) add("Exits", "TP and SL active");
   }
   if (rangeIceberg) {
     for (const fact of rangeIcebergTierFacts(executor)) {

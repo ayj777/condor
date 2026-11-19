@@ -15,7 +15,7 @@ import { PairLabel } from "@/components/executor/PairLabel";
 import { ExecutorHoverRow } from "@/components/trade/ExecutorDetailPopup";
 import { useResizeDrag } from "@/hooks/useResizeDrag";
 import { type ExecutorInfo } from "@/lib/api";
-import { displayedExecutorType, entryPause, rangeIcebergTierLine } from "@/lib/executor-run";
+import { displayedExecutorType, entryPause, icebergHasExits, rangeIcebergTierLine } from "@/lib/executor-run";
 import {
   formatUsd,
   formatVolume,
@@ -193,7 +193,9 @@ const ExecutorRow = memo(function ExecutorRow({
             {pause.reason && (
               <span className="text-[10px] text-[var(--color-text-muted)]">{pause.reason}</span>
             )}
-            <span className="text-[10px] text-[var(--color-green)]">TP and SL active</span>
+            {icebergHasExits(ex) && (
+              <span className="text-[10px] text-[var(--color-green)]">TP and SL active</span>
+            )}
           </div>
         )}
       </td>
@@ -528,7 +530,9 @@ export function DetailPanel({
                 <span className="rounded-full bg-[var(--color-yellow)]/15 px-2 py-0.5 text-xs font-bold uppercase text-[var(--color-yellow)]">
                   Paused{pause.reason ? `: ${pause.reason}` : ""}
                 </span>
-                <span className="text-xs text-[var(--color-green)]">TP and SL active</span>
+                {icebergHasExits(executor) && (
+                  <span className="text-xs text-[var(--color-green)]">TP and SL active</span>
+                )}
               </>
             )}
             <span className="text-[var(--color-text-muted)]">{executor.connector}</span>

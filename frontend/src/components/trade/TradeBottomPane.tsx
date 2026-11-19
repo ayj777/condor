@@ -16,7 +16,7 @@ import {
   pnlTextClass,
   isExecutorActive,
 } from "@/lib/formatters";
-import { childOrderIds, entryPause, executorBaseSizeNote, executorRunDetail, executorTypeLabel, rangeIcebergTierLine } from "@/lib/executor-run";
+import { childOrderIds, entryPause, executorBaseSizeNote, executorRunDetail, executorTypeLabel, icebergHasExits, rangeIcebergTierLine } from "@/lib/executor-run";
 import { ExecutorHoverRow } from "@/components/trade/ExecutorDetailPopup";
 import { stopKeepCopy } from "@/lib/executorStopCopy";
 import { mergeById } from "@/lib/range-iceberg";
@@ -552,7 +552,9 @@ export function TradeBottomPane({
                                       {pause.reason && (
                                         <span className="text-[9px] text-[var(--color-text-muted)]">{pause.reason}</span>
                                       )}
-                                      <span className="text-[9px] text-[var(--color-green)]">TP and SL active</span>
+                                      {icebergHasExits(ex) && (
+                                        <span className="text-[9px] text-[var(--color-green)]">TP and SL active</span>
+                                      )}
                                     </>
                                   )}
                                   {detail.filled && (

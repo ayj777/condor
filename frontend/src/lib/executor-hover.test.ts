@@ -409,6 +409,20 @@ describe("executor hover details", () => {
     expect(model.rows.find((row) => row.label === "Tier open")?.value).toBe("10 AIOT");
   });
 
+  it("does not claim exits are active when a paused tier has none", () => {
+    const model = executorHoverModel(
+      executor({
+        timestamp: 0,
+        pnl: 0,
+        config: { mode: "UP_TO", limit_price: 0.1 },
+        custom_info: { entry_paused: true, pause_reason: "deeper tier active" },
+      }),
+    );
+    expect(model.entryPaused).toBe(true);
+    expect(model.rows.find((row) => row.label === "Paused")?.value).toBe("deeper tier active");
+    expect(model.rows.find((row) => row.label === "Exits")).toBeUndefined();
+  });
+
   it("labels the shared position apart from the tier and shows a flat external close", () => {
     const shared = executorHoverModel(
       executor({
