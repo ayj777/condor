@@ -319,10 +319,62 @@ export function normalizedEditDraft(draft: RangeIcebergEditDraft): RangeIcebergE
   return draftFromOrderState(orderStateForEdit(draft));
 }
 
-export function validateRangeIcebergEdit(draft: RangeIcebergEditDraft, filled: number | null): string | null {
+/** Live `slice_amount` in the same unit as the total. Zero when the executor has none. */
+export function liveSliceAmount(source: RangeIcebergEditSource): number {
+  const value = read(source, "slice_amount");
+  return value == null || value === "" ? 0 : num(value);
+}
+
+function textOf(source: RangeIcebergEditSource, key: string): string {
+  const value = read(source, key);
+  return value == null ? "" : String(value).trim();
+}
+
+/**
+ * Settings the edit endpoint cannot change. Shown so a total edit does not
+ * look like it will move the schedule, the ladder, or the leverage.
+ */
+export function frozenIcebergLines(source: RangeIcebergEditSource, pair?: string): string[] {
+  const lines: string[] = [];
+  const duration = textOf(source, "duration");
+  const interval = textOf(source, "schedule_interval");
+  const start = textOf(source, "schedule_start").toUpperCase();
+  if (duration) {
+    const clock = start === "SUBMIT" ? "clock starts at submit" : "clock starts at the first fill";
+    const every = interval ? ` every ${interval}` : "";
+    lines.push(`Schedule ${duration}${every}, ${clock}`);
+  }
+  const levels = num(read(source, "levels"));
+  if (levels > 0) lines.push(`${levels} price rungs`);
+  const iceberg = read(source, "iceberg");
+  const visible = num(read(source, "visible_count"));
+  if (iceberg === true || String(iceberg).toLowerCase() === "true") {
+    lines.push(`Iceberg on${visible > 0 ? `, ${visible} visible` : ""}`);
+  } else if (iceberg === false || String(iceberg).toLowerCase() === "false") {
+    lines.push("Iceberg off");
+  }
+  const slice = liveSliceAmount(source);
+  if (slice > 0) {
+    lines.push(`Slice amount ${formatTokenAmount(slice)} ${rangeIcebergTotalUnitLabel(source, pair)}`);
+  }
+  const leverage = num(read(source, "leverage"));
+  if (leverage >= 1) lines.push(`Leverage ${leverage}x`);
+  const margin = textOf(source, "margin_mode");
+  if (margin) lines.push(`Margin ${margin}`);
+  return lines;
+}
+
+export function validateRangeIcebergEdit(
+  draft: RangeIcebergEditDraft,
+  filled: number | null,
+  sliceAmount = 0,
+): string | null {
   if (!(draft.totalAmount > 0)) return "Total amount is required";
   if (filled != null && filled > 0 && draft.totalAmount + 1e-9 < filled) {
     return "Total amount cannot be below the filled amount";
+  }
+  if (sliceAmount > 0 && draft.totalAmount + 1e-9 < sliceAmount) {
+    return "Total amount cannot be below the live slice amount";
   }
   if (draft.mode === "RANGE") {
     if (!(draft.priceLow > 0) || !(draft.priceHigh > 0)) {

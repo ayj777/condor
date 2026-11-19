@@ -219,6 +219,19 @@ describe("range iceberg edit", () => {
     expect(validateRangeIcebergEdit({ ...before, stopLoss: stop }, 0)).toMatch(/below the entry/);
   });
 
+  it("rejects a long stop inside the range and a total below the live slice", () => {
+    const before = normalizedEditDraft(rangeIcebergEditFromExecutor(iceberg()));
+    const inside = before.stopLoss ? { ...before.stopLoss, trigger: "price" as const, price: 0.075 } : null;
+    expect(validateRangeIcebergEdit({ ...before, stopLoss: inside }, 0)).toMatch(/below price low/);
+    expect(validateRangeIcebergEdit({ ...before, totalAmount: 20 }, 0, 30)).toBe(
+      "Total amount cannot be below the live slice amount",
+    );
+    const patch = rangeIcebergEditPatch(before, { ...before, totalAmount: 80 });
+    expect(patch).toEqual({ total_amount: 80 });
+    expect(patch).not.toHaveProperty("leverage");
+    expect(patch).not.toHaveProperty("slice_amount");
+  });
+
   it("hides edit for a parked hold, a closing exit, and anything that is not running", () => {
     expect(rangeIcebergEditable(iceberg())).toBe(true);
     expect(rangeIcebergEditable(iceberg({ close_type: "POSITION_HOLD" }))).toBe(false);

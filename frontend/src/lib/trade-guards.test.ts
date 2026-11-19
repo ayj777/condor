@@ -18,6 +18,7 @@ const input = (patch: Partial<RangeIcebergInput> = {}): RangeIcebergInput => ({
   levels: 10,
   duration: "",
   scheduleInterval: "",
+  scheduleStart: "SUBMIT",
   catchUp: "CARRY",
   capBehavior: "REST_AT_CAP",
   leverage: 2,
@@ -31,6 +32,7 @@ const input = (patch: Partial<RangeIcebergInput> = {}): RangeIcebergInput => ({
   priceJitterPct: 0,
   timingJitterPct: 0,
   minOrderInterval: 0.6,
+  expiry: "",
   expirySeconds: 0,
   maxSlippage: 0,
   randomSeed: "",
@@ -38,15 +40,16 @@ const input = (patch: Partial<RangeIcebergInput> = {}): RangeIcebergInput => ({
 });
 
 describe("review guards", () => {
-  it("fits every iceberg child to the step", () => {
+  it("sends a base range total and lets the ladder split it", () => {
     const sent = icebergSentSize(input(), { minOrderSize: 10, increment: 10 }, 0.08, false);
     expect(sent.error).toBeNull();
-    expect(sent.perSlice % 10).toBe(0);
-    expect(sent.total).toBe(sent.perSlice * sent.sliceCount);
-    expect(sent.total).toBeLessThanOrEqual(60770);
+    expect(sent.sizeUnit).toBe("BASE");
+    expect(sent.total).toBe(60770);
+    expect(sent.rungs).toBeGreaterThan(0);
+    expect(sent.baseTotal).toBeLessThanOrEqual(60770);
   });
 
-  it("caps the total before flooring each child", () => {
+  it("caps a base range at the open size without writing a slice", () => {
     const sent = icebergSentSize(
       input({ totalAmount: 100000 }),
       { minOrderSize: 10, increment: 10 },
@@ -55,9 +58,8 @@ describe("review guards", () => {
       60770,
     );
     expect(sent.error).toBeNull();
-    expect(sent.perSlice).toBe(6070);
-    expect(sent.total).toBe(60700);
-    expect(sent.sliceCount).toBe(10);
+    expect(sent.total).toBe(60770);
+    expect(sent.sizeUnit).toBe("BASE");
   });
 
   it("blocks contracts until they are confirmed", () => {
@@ -77,12 +79,11 @@ describe("review guards", () => {
       true,
     );
     expect(sent.error).toBeNull();
-    expect(sent.perSlice).toBe(1);
     expect(sent.sizeUnit).toBe("CONTRACTS");
-    expect(sent.total).toBe(sent.perSlice * sent.sliceCount);
+    expect(sent.total).toBe(15);
   });
 
-  it("caps contracts in base before flooring each child", () => {
+  it("caps contracts by the open base size", () => {
     const sent = icebergSentSize(
       input({ sizeUnit: "CONTRACTS", totalAmount: 7000, levels: 10 }),
       { minOrderSize: 1, increment: 1, contractSize: 10 },
@@ -91,8 +92,7 @@ describe("review guards", () => {
       60770,
     );
     expect(sent.error).toBeNull();
-    expect(sent.perSlice).toBe(607);
-    expect(sent.total).toBe(6070);
+    expect(sent.total).toBe(6077);
     expect(sent.total * 10).toBeLessThanOrEqual(60770);
   });
 
@@ -186,7 +186,7 @@ describe("review guards", () => {
     expect(defaultKeepPosition(0)).toBe(false);
   });
 
-  it("rounds a base iceberg down to a whole contract", () => {
+  it("sends the typed base total and reports the ladder after the contract step", () => {
     const sent = icebergSentSize(
       input({ totalAmount: 25, levels: 1, duration: "", scheduleInterval: "" }),
       { minOrderSize: 10, increment: 1, contractSize: 10 },
@@ -195,10 +195,11 @@ describe("review guards", () => {
     );
     expect(sent.error).toBeNull();
     expect(sent.sizeUnit).toBe("BASE");
-    expect(sent.total).toBe(20);
+    expect(sent.total).toBe(25);
+    expect(sent.baseTotal).toBe(20);
   });
 
-  it("sends a quote iceberg as floored base", () => {
+  it("sends a quote range as quote and previews the ladder base", () => {
     const sent = icebergSentSize(
       input({ sizeUnit: "QUOTE", totalAmount: 80, levels: 2, priceLow: 0.08, priceHigh: 0.08 }),
       { minOrderSize: 10, increment: 10 },
@@ -206,9 +207,42 @@ describe("review guards", () => {
       false,
     );
     expect(sent.error).toBeNull();
-    expect(sent.sizeUnit).toBe("BASE");
-    expect(sent.perSlice % 10).toBe(0);
-    expect(sent.total).toBe(sent.perSlice * sent.sliceCount);
+    expect(sent.sizeUnit).toBe("QUOTE");
+    expect(sent.total).toBe(80);
+    expect(sent.baseTotal).toBe(1000);
+  });
+
+  it("does not cap a quote close by the base position size", () => {
+    const config: Record<string, unknown> = {
+      side: "SELL",
+      total_amount: 100,
+      size_unit: "QUOTE",
+      position_action: "OPEN",
+    };
+    expect(applyClose(
+      config,
+      { amount: 10, side: "LONG", leverage: 2, marginMode: "ISOLATED" },
+      "CLOSE",
+    )).toBeNull();
+    expect(config.total_amount).toBe(100);
+    expect(config.reduce_only).toBe(true);
+
+    const hedge: Record<string, unknown> = {
+      side: "BUY",
+      total_amount: 100,
+      size_unit: "QUOTE",
+    };
+    expect(applyHedge(
+      hedge,
+      {
+        long: { amount: 10, side: "LONG", leverage: 2, marginMode: null },
+        short: null,
+      },
+      "CLOSE",
+      1,
+    )).toBeNull();
+    expect(hedge.total_amount).toBe(100);
+    expect(hedge.reduce_only).toBe(true);
   });
 
   it("does not treat a hedge short as the same book as the long", () => {

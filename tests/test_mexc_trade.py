@@ -312,6 +312,13 @@ def test_an_open_2x_position_is_not_moved_to_the_form_default():
     assert config["leverage"] == 2
     assert "margin_mode" not in config
 
+    # A missing leverage is the executor default of 1, and that default calls
+    # set_leverage. An open position fills the key so the create changes nothing.
+    del config["leverage"]
+    asyncio.run(apply_venue_account_settings(client, "master_account", config))
+    assert config["leverage"] == 2
+    assert trading.leverage_calls == []
+
     config["leverage"] = 5
     config["leverage_explicit"] = True
     config["margin_mode"] = "CROSS"
