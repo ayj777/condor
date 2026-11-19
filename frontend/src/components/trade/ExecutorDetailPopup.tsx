@@ -176,6 +176,21 @@ export function ExecutorDetailPopup({
           ))}
         </div>
       )}
+      {model.notes.length > 0 && (
+        <div className="mb-1.5 space-y-1">
+          {model.notes.map((note) => (
+            <p
+              key={`${note.title}:${note.detail}`}
+              className="rounded border border-[var(--color-primary)]/40 bg-[var(--color-primary)]/10 px-1.5 py-1 text-[10px] text-[var(--color-text)]"
+            >
+              <span className="font-medium">{note.title}</span>
+              {note.detail ? (
+                <span className="mt-0.5 block break-words font-mono text-[var(--color-text-muted)]">{note.detail}</span>
+              ) : null}
+            </p>
+          ))}
+        </div>
+      )}
       <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5">
         {model.rows.map((row) => (
           <div key={row.label} className="contents">

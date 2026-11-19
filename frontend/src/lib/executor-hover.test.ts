@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { ExecutorInfo } from "@/lib/api";
 import { executorHoverModel, formatStartMyt, placePopup } from "@/lib/executor-hover";
+import { executorRunDetail } from "@/lib/executor-run";
 
 function executor(patch: Partial<ExecutorInfo> = {}): ExecutorInfo {
   return {
@@ -457,6 +458,32 @@ describe("executor hover details", () => {
 
     const quiet = executorHoverModel(executor({ timestamp: 0, pnl: 0, custom_info: {} }));
     expect(quiet.warnings).toEqual([]);
+    expect(quiet.notes).toEqual([]);
+  });
+
+  it("shows a config edit note as info, beside a failure when both are present", () => {
+    const noted = executor({
+      timestamp: 0,
+      pnl: 0,
+      custom_info: {
+        config_edit_note: "total amount was clamped to the filled amount",
+        config_edit_error: "stop loss was not applied",
+        pending_config_edit: true,
+      },
+    });
+    const model = executorHoverModel(noted);
+    expect(model.notes).toEqual([
+      { title: "Config edit", detail: "total amount was clamped to the filled amount" },
+    ]);
+    expect(model.warnings).toEqual([
+      { title: "Config edit failed", detail: "stop loss was not applied" },
+      { title: "Config edit pending", detail: "" },
+    ]);
+    expect(executorRunDetail(noted)).toMatchObject({
+      configEditNote: "total amount was clamped to the filled amount",
+      configEditError: "stop loss was not applied",
+      configEditPending: true,
+    });
   });
 });
 

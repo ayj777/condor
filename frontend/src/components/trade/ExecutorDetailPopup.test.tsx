@@ -144,4 +144,42 @@ describe("executor row focus", () => {
     const badge = open?.querySelector("[role='status']");
     expect(badge?.className).toContain("color-yellow");
   });
+
+  it("shows a config edit note as info, not as a warning", () => {
+    act(() => {
+      root.render(
+        <table>
+          <tbody>
+            <ExecutorHoverRow
+              executor={{
+                ...executor,
+                id: "ri-note",
+                custom_info: {
+                  config_edit_note: "cancels still pending",
+                  config_edit_error: "take profit was not applied",
+                },
+              }}
+            >
+              <td>AIOT</td>
+            </ExecutorHoverRow>
+          </tbody>
+        </table>,
+      );
+    });
+    act(() => {
+      container.querySelector("tr")?.focus();
+    });
+    const open = document.querySelector("[data-executor-detail='ri-note']");
+    const note = [...(open?.querySelectorAll("p") ?? [])].find((el) =>
+      el.textContent?.includes("cancels still pending"),
+    );
+    const failure = [...(open?.querySelectorAll("p") ?? [])].find((el) =>
+      el.textContent?.includes("take profit was not applied"),
+    );
+    expect(note?.textContent).toContain("Config edit");
+    expect(note?.className).toContain("color-primary");
+    expect(note?.className).not.toContain("color-yellow");
+    expect(note?.className).not.toContain("color-red");
+    expect(failure?.className).toContain("color-yellow");
+  });
 });

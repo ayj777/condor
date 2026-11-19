@@ -30,6 +30,8 @@ export interface ExecutorHoverModel {
   closeType: string;
   statusMessage: string;
   warnings: ExecutorWarning[];
+  /** Applied edits that carry a note. Shown apart from the warning badges. */
+  notes: ExecutorWarning[];
 }
 
 const WORKING = new Set([
@@ -296,6 +298,7 @@ export function executorHoverModel(executor: ExecutorInfo, now = Date.now()): Ex
     closeType: pretty(text(executor.close_type)),
     statusMessage,
     warnings: executorWarnings(executor, info, top, stopInPlace),
+    notes: executorConfigNotes(executor),
   };
 }
 
@@ -360,6 +363,12 @@ function executorWarnings(
   if (edit.error) warnings.push({ title: "Config edit failed", detail: edit.error });
   if (edit.pending) warnings.push({ title: "Config edit pending", detail: edit.detail });
   return warnings;
+}
+
+function executorConfigNotes(executor: ExecutorInfo): ExecutorWarning[] {
+  const edit = executorConfigEdit(executor);
+  if (!edit.note) return [];
+  return [{ title: "Config edit", detail: edit.note }];
 }
 
 function quotePnl(value: number): string {

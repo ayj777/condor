@@ -60,32 +60,40 @@ function editField(ex: ExecutorInfo, key: string): unknown {
 }
 
 /**
- * A queued in-place edit, and the reason the last one failed.
+ * A queued in-place edit, a note about one that applied, and a failure.
  *
  * Absent fields stay quiet. `pending_config_edit` may be a flag or the
- * change object. `config_edit_error` is the sentence the row shows.
+ * change object. `config_edit_note` is an applied edit with a caveat.
+ * `config_edit_error` means the edit was not applied.
  */
 export function executorConfigEdit(ex: ExecutorInfo | null | undefined): {
   pending: boolean;
   detail: string;
   error: string;
+  note: string;
 } {
-  if (!ex) return { pending: false, detail: "", error: "" };
+  if (!ex) return { pending: false, detail: "", error: "", note: "" };
   const error = editText(editField(ex, "config_edit_error"));
+  const note = editText(editField(ex, "config_edit_note"));
   const pendingRaw = editField(ex, "pending_config_edit");
+  let pending = false;
+  let detail = "";
   if (pendingRaw === true || pendingRaw === "true" || pendingRaw === 1 || pendingRaw === "1") {
-    return { pending: true, detail: "", error };
-  }
-  if (typeof pendingRaw === "string") {
+    pending = true;
+  } else if (typeof pendingRaw === "string") {
     const text = pendingRaw.trim();
-    if (text && text !== "false" && text !== "0") return { pending: true, detail: text, error };
-    return { pending: false, detail: "", error };
-  }
-  if (pendingRaw && typeof pendingRaw === "object" && !Array.isArray(pendingRaw)) {
+    if (text && text !== "false" && text !== "0") {
+      pending = true;
+      detail = text;
+    }
+  } else if (pendingRaw && typeof pendingRaw === "object" && !Array.isArray(pendingRaw)) {
     const keys = Object.keys(pendingRaw as Record<string, unknown>);
-    if (keys.length) return { pending: true, detail: keys.join(", "), error };
+    if (keys.length) {
+      pending = true;
+      detail = keys.join(", ");
+    }
   }
-  return { pending: false, detail: "", error };
+  return { pending, detail, error, note };
 }
 
 /** Filled size, halt reason, and whether resume is meaningful for this row. */
@@ -95,6 +103,7 @@ export function executorRunDetail(ex: ExecutorInfo): {
   canResume: boolean;
   configEditPending: boolean;
   configEditError: string | null;
+  configEditNote: string | null;
 } {
   const info = ex.custom_info || {};
   const filled = Number(info.filled_amount);
@@ -116,6 +125,7 @@ export function executorRunDetail(ex: ExecutorInfo): {
     canResume: paused && isExecutorActive(ex.status),
     configEditPending: edit.pending,
     configEditError: edit.error || null,
+    configEditNote: edit.note || null,
   };
 }
 

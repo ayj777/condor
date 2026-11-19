@@ -546,6 +546,11 @@ export function TradeBottomPane({
                                   {detail.configEditPending && (
                                     <span className="text-[9px] text-[var(--color-text-muted)]">Edit pending</span>
                                   )}
+                                  {detail.configEditNote && (
+                                    <span className="text-[9px] text-[var(--color-primary)]" title={detail.configEditNote}>
+                                      {detail.configEditNote}
+                                    </span>
+                                  )}
                                 </div>
                               );
                             })()}
