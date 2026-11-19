@@ -1,5 +1,5 @@
 import type { ExecutorInfo } from "./api";
-import { executorTypeLabel, rangeIcebergMode } from "./executor-run";
+import { executorTypeLabel, rangeIcebergMode, rangeIcebergTierFacts } from "./executor-run";
 import { escapeHtml, formatPriceSig } from "./formatters";
 import {
   approximateQuoteLabel,
@@ -836,6 +836,14 @@ export function renderOverlayTooltipHtml(
         ? info.status_reason
         : "unknown_order_halt";
       addRow("Paused", reason, red);
+    }
+    for (const fact of rangeIcebergTierFacts({
+      type: "range_iceberg_executor",
+      trading_pair: o.pair,
+      config: cfg,
+      custom_info: info,
+    })) {
+      addRow(fact.label, fact.value);
     }
     if (cfg.margin_mode != null) addRow("Margin", String(cfg.margin_mode));
   }

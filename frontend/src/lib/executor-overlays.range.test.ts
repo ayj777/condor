@@ -75,10 +75,30 @@ describe("range iceberg on the chart and the bottom pane", () => {
     });
     expect(html).toContain("Limit iceberg");
     expect(html).not.toContain("Range iceberg");
+    expect(html).toContain("0.08137");
     expect(executorTypeLabel(executor({
       custom_info: { mode: "up to" },
       config: { mode: "RANGE" },
     }))).toBe("Limit iceberg");
+    const tiered = renderOverlayTooltipHtml(
+      computeExecutorOverlay(executor({
+        custom_info: { mode: "UP_TO", sibling_base: 2500 },
+        config: {
+          mode: "UP_TO",
+          limit_price: 0.09,
+          total_amount: 2000,
+          size_unit: "QUOTE",
+          duration: "1h",
+          group_id: "tier-b",
+        },
+      })),
+      { formatValue: (n) => String(n), formatPnl: (n) => String(n) },
+    );
+    expect(tiered).toContain("0.09");
+    expect(tiered).toContain("2,000 USDT");
+    expect(tiered).toContain("1h");
+    expect(tiered).toContain("tier-b");
+    expect(tiered).toContain("2,500 AIOT");
   });
 
   it("labels the row and offers resume while the halt is set", () => {

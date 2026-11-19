@@ -4,7 +4,6 @@ import { ExitEditor, rangeBound } from "@/components/executor/RangeIcebergFields
 import { NumberField, PriceField } from "@/components/executor/fields";
 import { orderReducer } from "@/components/executor/order-config";
 import { ErrorToast } from "@/components/executor/ExecutorSuccessModal";
-import { positionSideNotice } from "@/lib/api-error";
 import type { ExecutorInfo } from "@/lib/api";
 import { exitReference } from "@/lib/range-iceberg";
 import { approximateQuoteLabel, pairTokens, referenceSizePrice } from "@/lib/order-size";
@@ -166,7 +165,7 @@ export function RangeIcebergEditDialog({
         {localError && (
           <p className="mt-2 text-[11px] text-[var(--color-red)]">{localError}</p>
         )}
-        {error && <ErrorToast message={positionSideNotice(error)} />}
+        {error && <ErrorToast message={error} />}
         <div className="mt-3 flex justify-end gap-2">
           <button
             type="button"

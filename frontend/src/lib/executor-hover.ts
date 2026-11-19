@@ -1,6 +1,6 @@
 import type { ExecutorInfo } from "@/lib/api";
 import { formatPriceSig } from "@/lib/formatters";
-import { executorConfigEdit, executorTypeLabel } from "@/lib/executor-run";
+import { executorConfigEdit, executorTypeLabel, rangeIcebergTierFacts } from "@/lib/executor-run";
 import {
   approximateQuoteLabel,
   formatTokenAmount,
@@ -317,6 +317,12 @@ export function executorHoverModel(
   if (avg != null && avg > 0) add("Avg fill", priceText(avg));
 
   const top = executor as unknown as Record<string, unknown>;
+  if (rangeIceberg) {
+    for (const fact of rangeIcebergTierFacts(executor)) {
+      if (fact.label === "Group" || fact.label === "Sibling base") add(fact.label, fact.value);
+    }
+  }
+
   const stopInPlace = exchangeStopInPlace(info, top);
   addExitRows(rows, info, executor.trading_pair, stopInPlace, sizePrice);
 
@@ -462,6 +468,9 @@ function addExitRows(
   const average = num(info.exit_average_price);
   const pnl = num(info.realized_pnl_quote);
   const openBase = num(info.open_base);
+  const exchangeBase = num(info.exchange_position_base);
+  const externalClose = flag(info.external_close) === true;
+  const reconcile = messageText(info.reconcile_error);
   const stateKey = stateToken(info.exit_state);
   const hasExitState = stateKey !== "";
   const stateLabel =
@@ -475,7 +484,8 @@ function addExitRows(
   const stateMoving = stateLabel !== "";
   const flatDone = stateKey === "DONE" && openBase === 0;
   const reported =
-    hasTrigger || hasFill || stateMoving || hasOpen || exchangeStop || exitOrders > 0 || flatDone;
+    hasTrigger || hasFill || stateMoving || hasOpen || exchangeStop || exitOrders > 0 || flatDone
+    || externalClose || exchangeBase != null || reconcile !== "";
   if (hasExitState) {
     if (!reported) return;
   } else if (!reported && !legacyMoving && !active) {
@@ -503,7 +513,10 @@ function addExitRows(
     }
     if (active) add("Exit", pretty(active));
   }
-  if (hasOpen || (openBase === 0 && stateKey === "DONE")) add("Open", amountText(openBase ?? 0));
+  if (externalClose) add("Position (shared)", "flat");
+  else if (exchangeBase != null) add("Position (shared)", amountText(exchangeBase));
+  if (hasOpen || (openBase === 0 && stateKey === "DONE")) add("Tier open", amountText(openBase ?? 0));
+  if (reconcile) add("Reconcile error", reconcile);
   if (hasFill && closed != null) add("Exit filled", amountText(closed));
   if (exchangeStop) add("Exchange stop", "In place");
   if (exitOrders > 0) add("Exit orders", String(exitOrders));

@@ -80,6 +80,8 @@ interface Props {
    */
   baseSymbol?: string;
   quoteSymbol?: string;
+  /** Shown on the iceberg form when another open tier uses this stop price. */
+  stopWarning?: string;
 }
 
 export function OrderConfigPanel({
@@ -107,6 +109,7 @@ export function OrderConfigPanel({
   quoteAvailable = null,
   baseSymbol,
   quoteSymbol,
+  stopWarning = "",
 }: Props) {
   const displayBase = baseSymbol || pair?.split("-")[0] || "";
   const displayQuote = quoteSymbol || pair?.split("-")[1] || "";
@@ -362,6 +365,7 @@ export function OrderConfigPanel({
           quoteSymbol={displayQuote}
           maxBase={orderCap(positionMode, books, openBook ?? null, state.position_action, state.side)}
           hedge={isHedge(positionMode)}
+          stopWarning={stopWarning}
         />
       )}
 

@@ -15,7 +15,7 @@ import {
   pnlTextClass,
   isExecutorActive,
 } from "@/lib/formatters";
-import { childOrderIds, executorBaseSizeNote, executorRunDetail, executorTypeLabel } from "@/lib/executor-run";
+import { childOrderIds, executorBaseSizeNote, executorRunDetail, executorTypeLabel, rangeIcebergTierLine } from "@/lib/executor-run";
 import { ExecutorHoverRow } from "@/components/trade/ExecutorDetailPopup";
 import { stopKeepCopy } from "@/lib/executorStopCopy";
 import { rangeIcebergEditable } from "@/lib/range-iceberg-edit";
@@ -481,6 +481,7 @@ export function TradeBottomPane({
                       const entry = getEntryPrice(ex);
                       const exit = getExitPrice(ex);
                       const closeLabel = ex.close_type ? ex.close_type.replace(/_/g, " ") : "";
+                      const tierLine = rangeIcebergTierLine(ex);
                       return (
                         <ExecutorHoverRow
                           key={ex.id}
@@ -507,6 +508,11 @@ export function TradeBottomPane({
                             <span className="rounded bg-[var(--color-bg)] px-1.5 py-0.5 text-[10px] font-medium border border-[var(--color-border)]/50">
                               {executorTypeLabel(ex)}
                             </span>
+                            {tierLine && (
+                              <div className="mt-0.5 max-w-[16rem] font-mono text-[9px] leading-snug text-[var(--color-text-muted)]">
+                                {tierLine}
+                              </div>
+                            )}
                           </td>
                           <td className="px-3 py-1.5">
                             <span

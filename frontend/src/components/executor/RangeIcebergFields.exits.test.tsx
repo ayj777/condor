@@ -24,7 +24,7 @@ let container: HTMLDivElement;
 let root: Root;
 let dispatched: OrderAction[];
 
-function render(patch: Partial<OrderState> = {}, hedge = false) {
+function render(patch: Partial<OrderState> = {}, hedge = false, stopWarning = "") {
   const state: OrderState = {
     ...ORDER_DEFAULTS,
     execution_strategy: "RANGE_ICEBERG",
@@ -43,6 +43,7 @@ function render(patch: Partial<OrderState> = {}, hedge = false) {
         baseSymbol="AIOT"
         quoteSymbol="USDT"
         hedge={hedge}
+        stopWarning={stopWarning}
       />,
     );
   });
@@ -196,6 +197,16 @@ describe("range iceberg exits", () => {
     expect(container.textContent).toContain("Schedule start");
     expect(container.textContent).toContain("The clock starts when you submit");
     expect(container.textContent).toContain("Catch up");
+  });
+
+  it("warns before submit when another tier uses this stop", () => {
+    render(
+      { ri_sl_enabled: true, ri_sl_trigger: "price", ri_sl_price: 0.07 },
+      false,
+      "Another open iceberg on this side already uses stop 0.07. The trading API refuses two tiers with the same stop price.",
+    );
+    expect(container.textContent).toContain("same stop price");
+    expect(container.textContent).toContain("Stop loss");
   });
 
   it("hides the hedge reduce-only toggle", () => {

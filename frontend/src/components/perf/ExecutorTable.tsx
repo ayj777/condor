@@ -15,7 +15,7 @@ import { PairLabel } from "@/components/executor/PairLabel";
 import { ExecutorHoverRow } from "@/components/trade/ExecutorDetailPopup";
 import { useResizeDrag } from "@/hooks/useResizeDrag";
 import { type ExecutorInfo } from "@/lib/api";
-import { displayedExecutorType } from "@/lib/executor-run";
+import { displayedExecutorType, rangeIcebergTierLine } from "@/lib/executor-run";
 import {
   formatUsd,
   formatVolume,
@@ -179,6 +179,11 @@ const ExecutorRow = memo(function ExecutorRow({
         <span className="rounded bg-[var(--color-surface)] px-2 py-0.5 text-xs font-medium border border-[var(--color-border)]/50">
           {displayedExecutorType(ex)}
         </span>
+        {rangeIcebergTierLine(ex) && (
+          <div className="mt-0.5 max-w-[16rem] font-mono text-[10px] leading-snug text-[var(--color-text-muted)]">
+            {rangeIcebergTierLine(ex)}
+          </div>
+        )}
       </td>
       <td className="px-4 py-2.5 text-sm text-[var(--color-text-muted)]">
         {ex.connector}
@@ -500,6 +505,11 @@ export function DetailPanel({
             <span className="rounded bg-[var(--color-surface)] px-2 py-0.5 text-xs font-medium border border-[var(--color-border)]/50">
               {displayedExecutorType(executor)}
             </span>
+            {rangeIcebergTierLine(executor) && (
+              <span className="font-mono text-xs text-[var(--color-text-muted)]">
+                {rangeIcebergTierLine(executor)}
+              </span>
+            )}
             <span className="text-[var(--color-text-muted)]">{executor.connector}</span>
             <PairLabel tradingPair={executor.trading_pair} connector={executor.connector} />
             <span

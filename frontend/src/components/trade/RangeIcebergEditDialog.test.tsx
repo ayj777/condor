@@ -231,20 +231,20 @@ describe("range iceberg edit dialog", () => {
     expect(submitted[0]).not.toHaveProperty("slice_amount");
   });
 
-  it("shows the 409 reason in the error toast, with long instead of buy", () => {
+  it("shows the 409 reason in the error toast as the API sent it", () => {
+    const error = "A range iceberg is already open on AIOT-USDT BUY for master_account (executor hidden-id). Close it first.";
     render(
       <RangeIcebergEditDialog
         executor={executor()}
         pending={false}
-        error={"A range iceberg is already open on AIOT-USDT BUY for master_account (executor hidden-id). Close it first."}
+        error={error}
         onClose={() => {}}
         onSubmit={() => {}}
       />,
     );
     const toast = container.querySelector(".text-\\[var\\(--color-red\\)\\]");
-    expect(container.textContent).toContain("LONG");
-    expect(container.textContent).toContain("already open");
-    expect(container.textContent).not.toContain(" BUY ");
+    expect(container.textContent).toContain(error);
+    expect(container.textContent).not.toContain("LONG");
     expect(toast).not.toBeNull();
   });
 });

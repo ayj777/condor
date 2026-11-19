@@ -136,15 +136,13 @@ def test_a_404_string_is_unchanged():
     assert message == text
 
 
-def test_an_already_open_refusal_says_long():
+def test_an_already_open_refusal_is_the_api_text():
     text = (
         "A range iceberg is already open on AIOT-USDT BUY for master_account "
         "(executor abc). Close it first."
     )
     _status, message = describe_executor_error(_api_error(409, text))
-    assert "LONG" in message
-    assert " BUY " not in message
-    assert "AIOT-USDT" in message
+    assert message == text
 
 
 def test_update_forwards_null_and_a_decimal_string():

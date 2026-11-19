@@ -242,21 +242,24 @@ describe("range iceberg edit", () => {
       custom_info: { exit_state: "CLOSING", filled_base: 1 },
     }))).toBe(false);
     expect(rangeIcebergEditable(iceberg({ type: "position_executor" }))).toBe(false);
+    expect(rangeIcebergEditable(iceberg({ close_type: "POSITION_CLOSED_EXTERNALLY" }))).toBe(false);
+    expect(rangeIcebergEditable(iceberg({
+      status: "running",
+      custom_info: { external_close: true, filled_base: "1" },
+    }))).toBe(false);
   });
 
-  it("shows a 409 reason, a 422 field error, and long instead of buy", () => {
+  it("shows a 409 and a 422 as the API sent them", () => {
     expect(apiErrorMessage({
       detail: { accepted: false, reason: "stop loss is closing", executor_id: "ex-1" },
     }, 409)).toBe("stop loss is closing");
     expect(apiErrorMessage({
       detail: [{ loc: ["body", "nope"], msg: "Extra inputs are not permitted" }],
     }, 422)).toBe("nope: Extra inputs are not permitted");
-    expect(apiErrorMessage({
-      detail: "A range iceberg is already open on AIOT-USDT SELL for master_account (executor abc). Close it first.",
-    }, 409)).toContain("SHORT");
-    expect(apiErrorMessage({
-      detail: "A range iceberg is already open on AIOT-USDT SELL for master_account (executor abc). Close it first.",
-    }, 409)).not.toContain(" SELL ");
+    const refusal = "A range iceberg is already open on AIOT-USDT SELL for master_account (executor abc). Close it first.";
+    expect(apiErrorMessage({ detail: refusal }, 409)).toBe(refusal);
+    const cap = "At most 10 open range icebergs are allowed on AIOT-USDT BUY for master_account.";
+    expect(apiErrorMessage({ detail: cap }, 409)).toBe(cap);
     expect(apiErrorMessage({ detail: "Executor ex-1 not found" }, 404)).toBe(
       "Executor ex-1 not found",
     );

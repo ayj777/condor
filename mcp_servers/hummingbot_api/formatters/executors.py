@@ -77,8 +77,14 @@ def format_executors_table(executors: list[dict[str, Any]]) -> str:
         return "No executors found."
 
     # Header
-    header = "id                                           | type            | connector         | pair       | status     | close_type           | side | volume      | pnl       | created"
-    separator = format_table_separator(210)
+    # POSITION_CLOSED_EXTERNALLY is 26 characters. A width of 20 runs that
+    # value into the side column.
+    close_width = 26
+    header = (
+        "id                                           | type            | connector         | pair       | status     | "
+        f"{'close_type':<{close_width}} | side | volume      | pnl       | created"
+    )
+    separator = format_table_separator(216)
 
     # Format each executor as a row
     rows = []
@@ -115,7 +121,7 @@ def format_executors_table(executors: list[dict[str, Any]]) -> str:
             get_field(executor, "timestamp", "created_at", default=0)
         )
 
-        row = f"{exec_id:44} | {exec_type:15} | {connector:17} | {trading_pair:10} | {status:10} | {close_type:20} | {side:4} | {volume:>11} | {pnl:>9} | {created}"
+        row = f"{exec_id:44} | {exec_type:15} | {connector:17} | {trading_pair:10} | {status:10} | {close_type:{close_width}} | {side:4} | {volume:>11} | {pnl:>9} | {created}"
         rows.append(row)
 
     return f"{header}\n{separator}\n" + "\n".join(rows)

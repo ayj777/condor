@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { ExecutorInfo } from "@/lib/api";
 import { executorHoverModel, formatStartMyt, placePopup } from "@/lib/executor-hover";
-import { executorRunDetail } from "@/lib/executor-run";
+import { executorRunDetail, rangeIcebergTierLine } from "@/lib/executor-run";
 
 function executor(patch: Partial<ExecutorInfo> = {}): ExecutorInfo {
   return {
@@ -271,7 +271,7 @@ describe("executor hover details", () => {
     expect(model.rows.map((row) => row.value)).not.toContain("Take Profit");
     // 2% of the 0.08 limit would be 0.0816. The card shows the executor price.
     expect(model.rows.find((row) => row.label === "TP trigger")?.value).toBe("0.0825");
-    expect(model.rows.find((row) => row.label === "Open")?.value).toBe("12,000 AIOT");
+    expect(model.rows.find((row) => row.label === "Tier open")?.value).toBe("12,000 AIOT");
     expect(model.rows.find((row) => row.label === "Exchange stop")?.value).toBe("In place");
     expect(model.rows.find((row) => row.label === "Exit orders")?.value).toBe("2");
     const dumped = JSON.stringify(model);
@@ -343,7 +343,7 @@ describe("executor hover details", () => {
     );
     expect(model.rows.find((row) => row.label === "Exit status")?.value).toBe("Armed");
     expect(model.rows.find((row) => row.label === "TP trigger")).toBeUndefined();
-    expect(model.rows.find((row) => row.label === "Open")?.value).toBe("100 AIOT");
+    expect(model.rows.find((row) => row.label === "Tier open")?.value).toBe("100 AIOT");
     expect(JSON.stringify(model)).not.toContain("0.0816");
   });
 
@@ -374,7 +374,48 @@ describe("executor hover details", () => {
     expect(closing.rows.find((row) => row.label === "Exit filled")?.value).toBe("40 AIOT");
     expect(closing.rows.find((row) => row.label === "Exit status")?.value).toBe("Closing");
     expect(closing.rows.find((row) => row.label === "Exit")?.value).toBe("Stop Loss");
-    expect(closing.rows.find((row) => row.label === "Open")?.value).toBe("60 AIOT");
+    expect(closing.rows.find((row) => row.label === "Tier open")?.value).toBe("60 AIOT");
+  });
+
+  it("labels the shared position apart from the tier and shows a flat external close", () => {
+    const shared = executorHoverModel(
+      executor({
+        timestamp: 0,
+        pnl: 0,
+        config: { mode: "UP_TO", limit_price: 0.1, total_amount: 1000, size_unit: "QUOTE", duration: "1h", group_id: "tier-a" },
+        custom_info: {
+          exit_state: "ARMED",
+          open_base: "400",
+          exchange_position_base: "900",
+          sibling_base: "500",
+        },
+      }),
+    );
+    expect(shared.rows.find((row) => row.label === "Position (shared)")?.value).toBe("900 AIOT");
+    expect(shared.rows.find((row) => row.label === "Tier open")?.value).toBe("400 AIOT");
+    expect(shared.rows.find((row) => row.label === "Group")?.value).toBe("tier-a");
+    expect(shared.rows.find((row) => row.label === "Sibling base")?.value).toBe("500 AIOT");
+    expect(rangeIcebergTierLine(executor({
+      config: { mode: "UP_TO", limit_price: 0.1, total_amount: 1000, size_unit: "QUOTE", duration: "1h", group_id: "tier-a" },
+      custom_info: { sibling_base: "500" },
+    }))).toBe("0.1 · 1,000 USDT · 1h · tier-a · 500 AIOT");
+
+    const flat = executorHoverModel(
+      executor({
+        timestamp: 0,
+        pnl: 0,
+        custom_info: {
+          exit_state: "DONE",
+          open_base: "12",
+          exchange_position_base: "12",
+          external_close: true,
+          reconcile_error: "position read failed",
+        },
+      }),
+    );
+    expect(flat.rows.find((row) => row.label === "Position (shared)")?.value).toBe("flat");
+    expect(flat.rows.find((row) => row.label === "Tier open")?.value).toBe("12 AIOT");
+    expect(flat.rows.find((row) => row.label === "Reconcile error")?.value).toBe("position read failed");
   });
 
   it("warns when the exchange stop was not placed, and prefers has_exchange_stop", () => {

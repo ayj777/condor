@@ -65,7 +65,7 @@ import {
 } from "@/lib/gridExecutor";
 import { formatConnectorName, formatPriceSig } from "@/lib/formatters";
 import { baseAmountError, legalBaseAmount, plainOrderPrice, plainOrderSentSize, plainOrderSummary } from "@/lib/order-size";
-import { icebergSentSize, oneAtATimeText, scheduleNote } from "@/lib/range-iceberg";
+import { icebergSentSize, oneAtATimeText, sameStopPriceWarning, scheduleNote } from "@/lib/range-iceberg";
 import { applyHedge, applyReducing, bookForOrder, canonicalPositionMode, claimInflight, ICEBERG_MARGIN_HOLD, icebergCreateHeld, isHedge, marginForOpen, MARGIN_CHOOSE, orderCap, ordersBlockCreate, positionModeBlocksCreate, sideHasOpenPosition, type HedgeBooks, type OpenBook } from "@/lib/trade-guards";
 import { useViewFacts } from "@/lib/viewFacts";
 
@@ -923,6 +923,10 @@ export function CreateExecutor() {
     ),
   });
   const marginBlocked = "block" in marginDecision;
+  const icebergStopWarning =
+    executorType === "iceberg" || orderConfig.state.execution_strategy === "RANGE_ICEBERG"
+      ? sameStopPriceWarning(rangeIcebergInput(orderConfig.state), pair, mainExecutors) ?? ""
+      : "";
 
   if (!server) {
     return <NoServerCard message="Select a server from the sidebar to create an executor." />;
@@ -1201,10 +1205,10 @@ export function CreateExecutor() {
                     <PositionConfigPanel state={positionConfig.state} dispatch={positionConfig.dispatch} validation={positionConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} sizeRule={pairRule} />
                   )}
                   {executorType === "order" && (
-                    <OrderConfigPanel state={orderConfig.state} dispatch={orderConfig.dispatch} validation={orderConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} connector={connector} strategies={orderStrategies} marginModes={caps.marginModes} sizeRule={pairRule} positionLeverage={orderLeverage} openBook={openBook} positionMode={canonicalPositionMode(positionModeQuery.data?.position_mode ?? "")} onApplyLeverage={() => leverageMutation.mutate()} applyingLeverage={leverageMutation.isPending} positionsLoaded={!isLoadingPositions} positionsFailed={isPositionsError} onStrategyHold={setStrategyHold} baseAvailable={balances.base} quoteAvailable={balances.quote} books={hedgeBooks} />
+                    <OrderConfigPanel state={orderConfig.state} dispatch={orderConfig.dispatch} validation={orderConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} connector={connector} strategies={orderStrategies} marginModes={caps.marginModes} sizeRule={pairRule} positionLeverage={orderLeverage} openBook={openBook} positionMode={canonicalPositionMode(positionModeQuery.data?.position_mode ?? "")} onApplyLeverage={() => leverageMutation.mutate()} applyingLeverage={leverageMutation.isPending} positionsLoaded={!isLoadingPositions} positionsFailed={isPositionsError} onStrategyHold={setStrategyHold} baseAvailable={balances.base} quoteAvailable={balances.quote} books={hedgeBooks} stopWarning={icebergStopWarning} />
                   )}
                   {executorType === "iceberg" && (
-                    <OrderConfigPanel state={orderConfig.state} dispatch={orderConfig.dispatch} validation={orderConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} connector={connector} strategies={orderStrategies} marginModes={caps.marginModes} sizeRule={pairRule} lockStrategy positionLeverage={orderLeverage} openBook={openBook} positionMode={canonicalPositionMode(positionModeQuery.data?.position_mode ?? "")} onApplyLeverage={() => leverageMutation.mutate()} applyingLeverage={leverageMutation.isPending} positionsLoaded={!isLoadingPositions} positionsFailed={isPositionsError} baseAvailable={balances.base} quoteAvailable={balances.quote} books={hedgeBooks} />
+                    <OrderConfigPanel state={orderConfig.state} dispatch={orderConfig.dispatch} validation={orderConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} connector={connector} strategies={orderStrategies} marginModes={caps.marginModes} sizeRule={pairRule} lockStrategy positionLeverage={orderLeverage} openBook={openBook} positionMode={canonicalPositionMode(positionModeQuery.data?.position_mode ?? "")} onApplyLeverage={() => leverageMutation.mutate()} applyingLeverage={leverageMutation.isPending} positionsLoaded={!isLoadingPositions} positionsFailed={isPositionsError} baseAvailable={balances.base} quoteAvailable={balances.quote} books={hedgeBooks} stopWarning={icebergStopWarning} />
                   )}
                   {executorType === "dca" && (
                     <DCAConfigPanel state={dcaConfig.state} dispatch={dcaConfig.dispatch} validation={dcaConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} />
