@@ -543,7 +543,7 @@ export function TradeBottomPane({
                                       {detail.halt ? "PAUSED" : "ACTIVE"}
                                     </span>
                                   ) : (
-                                    <span className="rounded px-1.5 py-0.5 text-[9px] font-medium bg-[var(--color-text-muted)]/10 text-[var(--color-text-muted)] capitalize">
+                                    <span className="inline-flex w-fit items-center rounded-full border border-[var(--color-red)]/50 bg-[var(--color-red)]/15 px-1.5 py-0.5 text-[9px] font-bold capitalize text-[var(--color-red)]">
                                       {closeLabel || ex.status}
                                     </span>
                                   )}
