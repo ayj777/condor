@@ -61,7 +61,7 @@ export interface RangeIcebergInput {
   duration: string;
   /** Empty releases the whole size at once. Seconds or `10m`. */
   scheduleInterval: string;
-  /** Used only when a duration is set. Submit starts the clock immediately. */
+  /** Duration clock. Submit starts it when the executor is created. */
   scheduleStart: ScheduleStart;
   catchUp: CatchUp;
   capBehavior: CapBehavior;
@@ -118,22 +118,30 @@ export interface RangeIcebergPreview {
   releaseCount: number | null;
 }
 
-/**
- * How many releases a duration and interval make.
- *
- * The executor uses `max(1, floor(duration / interval))`. A longer interval
- * than the duration is not a schedule this helper accepts.
- */
-export function scheduleSliceCount(durationSeconds: number, intervalSeconds: number): number | null {
-  if (!(durationSeconds > 0) || !(intervalSeconds > 0) || intervalSeconds > durationSeconds) return null;
-  return Math.max(1, Math.floor(durationSeconds / intervalSeconds));
-}
+type SliceSizes = Pick<RangeIcebergInput, "totalAmount" | "sliceAmount" | "levels">;
 
-/** True when the last part of the duration is shorter than one interval. */
-export function scheduleHasRemainder(durationSeconds: number, intervalSeconds: number): boolean {
-  const count = scheduleSliceCount(durationSeconds, intervalSeconds);
-  if (count == null) return false;
-  return durationSeconds - count * intervalSeconds > 1e-6;
+/**
+ * How many releases a schedule makes.
+ *
+ * A duration uses `max(1, floor(duration / interval))`. A longer interval
+ * than that duration is not a schedule this helper accepts. A blank
+ * duration uses the slice amount, then levels. It does not use the floor.
+ */
+export function scheduleSliceCount(
+  durationSeconds: number | null,
+  intervalSeconds: number,
+  sizes?: SliceSizes,
+): number | null {
+  if (!(intervalSeconds > 0)) return null;
+  if (durationSeconds == null || !(durationSeconds > 0)) {
+    if (sizes == null) return null;
+    if (sizes.sliceAmount > 0 && sizes.totalAmount > 0) {
+      return Math.max(1, Math.ceil(sizes.totalAmount / sizes.sliceAmount));
+    }
+    return Math.max(1, Math.trunc(sizes.levels) || 1);
+  }
+  if (intervalSeconds > durationSeconds) return null;
+  return Math.max(1, Math.floor(durationSeconds / intervalSeconds));
 }
 
 /**
@@ -166,10 +174,10 @@ export function intervalFromSliceCount(durationSeconds: number, slices: number):
 }
 
 function scheduleCount(input: RangeIcebergInput, seconds: number | null): number | null {
-  if (seconds == null) return null;
+  if (!input.scheduleInterval.trim()) return null;
   const interval = parseDuration(input.scheduleInterval);
   if (interval == null) return null;
-  return scheduleSliceCount(seconds, interval);
+  return scheduleSliceCount(seconds, interval, input);
 }
 
 /** How many orders can rest at once. Iceberg uses the visible count. Otherwise the schedule, else the rungs. */
@@ -193,25 +201,20 @@ export function restingOrderText(count: number): string {
 /**
  * What the Iceberg strategy places.
  *
- * `visible_count` 1 is one working order. A later schedule window only adds
- * size to the queue until that order fills. A larger count is how many may
- * rest together.
+ * `visible_count` 1 is one working order. The next waits until one fills.
+ * A larger count is how many may rest together.
  */
-export function oneAtATimeText(visibleCount: number, duration: string, interval: string): string {
+export function oneAtATimeText(visibleCount: number): string {
   const count = Math.max(1, Math.trunc(visibleCount) || 1);
-  const body = count === 1
+  return count === 1
     ? "One order at a time. The next is placed after the previous one fills."
     : `${count} orders at a time. The next is placed after one of them fills.`;
-  const seconds = duration.trim() ? parseDuration(duration) : null;
-  const every = interval.trim() ? parseDuration(interval) : null;
-  if (seconds == null || every == null || scheduleSliceCount(seconds, every) == null) return body;
-  return `${body} A new share is released every ${formatInterval(every)}.`;
 }
 
 export function scheduleStartLine(start: ScheduleStart): string {
   return start === "FIRST_FILL"
-    ? "The clock starts at the first fill. Until then only the first release is placed."
-    : "The clock starts when you submit.";
+    ? "The duration clock starts at the first fill."
+    : "The duration clock starts when you submit.";
 }
 
 /** The preview the form shows. Null until a total has been entered. */
@@ -226,9 +229,12 @@ export function rangeIcebergPreview(input: RangeIcebergInput): RangeIcebergPrevi
       : scheduled ?? Math.max(1, input.levels || 1);
   const perSlice = input.sliceAmount > 0 ? input.sliceAmount : input.totalAmount / sliceCount;
   let intervalSeconds: number | null = null;
-  if (seconds != null && input.scheduleInterval.trim()) {
+  if (input.scheduleInterval.trim()) {
     const parsed = parseDuration(input.scheduleInterval);
-    if (parsed != null && scheduleSliceCount(seconds, parsed) != null) intervalSeconds = parsed;
+    const counted = parsed == null
+      ? null
+      : scheduleSliceCount(seconds, parsed, input);
+    if (parsed != null && counted != null) intervalSeconds = parsed;
   }
   const maxPrice =
     input.mode === "RANGE"
@@ -683,9 +689,6 @@ export function validateRangeIceberg(input: RangeIcebergInput): string | null {
   if (hasDuration && !hasInterval) {
     return "A duration needs a schedule interval";
   }
-  if (!hasDuration && hasInterval) {
-    return "A schedule needs a duration";
-  }
   if (
     durationSeconds != null &&
     intervalSeconds != null &&
@@ -919,9 +922,9 @@ export function rangeIcebergConfig(
   if (expirySeconds != null && expirySeconds > 0) config.expiry_seconds = expirySeconds;
   if (input.maxSlippage > 0) config.max_slippage = input.maxSlippage;
   if (input.randomSeed.trim()) config.random_seed = Number(input.randomSeed.trim());
-  if (input.duration.trim()) {
-    config.duration = input.duration.trim();
-    if (input.scheduleInterval.trim()) config.schedule_interval = input.scheduleInterval.trim();
+  if (input.duration.trim()) config.duration = input.duration.trim();
+  if (input.scheduleInterval.trim()) {
+    config.schedule_interval = input.scheduleInterval.trim();
     config.schedule_start = input.scheduleStart;
   }
   if (input.takeProfit) config.take_profit = exitPayload("take_profit", input.takeProfit);
@@ -933,31 +936,36 @@ export function rangeIcebergConfig(
 /**
  * The line under the interval field.
  *
- * Null when no duration is set: the whole size goes out at once. A quote
- * range passes `baseTotal` from the ladder so the base figure is the sum of
- * the rungs, not the total divided by one price. While the market is outside
- * the range, Carry places a missed slice later and Skip drops it. An order
- * already on the book is left to fill.
+ * Null when the interval is missing. The next slice waits until the previous
+ * one is fully filled and one interval has passed. A blank duration has no
+ * time limit. A quote range passes `baseTotal` from the ladder so the base
+ * figure is the sum of the rungs, not the total divided by one price.
  */
 export function scheduleNote(args: {
   duration: string;
   interval: string;
   total: number;
+  sliceAmount: number;
+  levels: number;
   unit: SizeUnit;
   baseSymbol: string;
   quoteSymbol: string;
   price: number | null;
-  catchUp: CatchUp;
   /** Ladder base for the whole order. Used instead of `total / price`. */
   baseTotal?: number | null;
 }): string | null {
-  if (!args.duration.trim()) return null;
-  const seconds = parseDuration(args.duration);
+  if (!args.interval.trim()) return null;
   const intervalSeconds = parseDuration(args.interval);
-  if (seconds == null || intervalSeconds == null) return null;
-  const count = scheduleSliceCount(seconds, intervalSeconds);
+  if (intervalSeconds == null || !(intervalSeconds > 0)) return null;
+  const hasDuration = args.duration.trim().length > 0;
+  const seconds = hasDuration ? parseDuration(args.duration) : null;
+  if (hasDuration && seconds == null) return null;
+  const count = scheduleSliceCount(seconds, intervalSeconds, {
+    totalAmount: args.total,
+    sliceAmount: args.sliceAmount,
+    levels: args.levels,
+  });
   if (count == null) return null;
-  const every = formatInterval(intervalSeconds);
   const pieces = [`${count} ${count === 1 ? "slice" : "slices"}`];
   if (args.total > 0) {
     const per = args.total / count;
@@ -972,22 +980,20 @@ export function scheduleNote(args: {
       const converted = Number((args.baseTotal / count).toPrecision(12));
       other = ` (\u2248 ${formatTokenAmount(converted)} ${args.baseSymbol})`;
     } else if (args.price != null && args.price > 0 && args.unit !== "CONTRACTS") {
-      const converted = Number((args.unit === "QUOTE" ? per / args.price : per * args.price).toPrecision(12));
+      const converted = Number(
+        (args.unit === "QUOTE" ? per / args.price : per * args.price).toPrecision(12),
+      );
       const otherSymbol = args.unit === "QUOTE" ? args.baseSymbol : args.quoteSymbol;
       if (otherSymbol) other = ` (\u2248 ${formatTokenAmount(converted)} ${otherSymbol})`;
     }
     pieces.push(`about ${amount}${other}`);
   }
-  const sentences = [`${pieces.join(", ")} every ${every}`];
-  if (scheduleHasRemainder(seconds, intervalSeconds)) {
-    sentences.push("The last part of the duration gets no new slice");
-  }
-  if (count > 1) {
-    sentences.push(
-      args.catchUp === "SKIP"
-        ? "While the market is outside the range, a missed slice is dropped. An order already on the book is left to fill"
-        : "While the market is outside the range, a missed slice is placed later. An order already on the book is left to fill",
-    );
+  const sentences = [
+    pieces.join(", "),
+    "Each slice goes out one interval after the previous slice fully fills",
+  ];
+  if (!hasDuration) {
+    sentences.push("No time limit; runs until the full amount fills");
   }
   return `${sentences.join(". ")}.`;
 }

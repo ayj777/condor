@@ -125,16 +125,20 @@ describe("range iceberg exits", () => {
     });
     const text = container.textContent ?? "";
     expect(text).not.toContain("Schedule slices");
-    expect(text).toContain("6 slices, about 50 USDT (\u2248 625 AIOT) every 10m");
-    expect(text).toContain("a missed slice is placed later");
+    expect(text).toContain("6 slices, about 50 USDT (\u2248 625 AIOT)");
+    expect(text).toContain("Each slice goes out one interval after the previous slice fully fills");
+    expect(text).not.toContain("missed slice");
+    expect(text).not.toContain("No time limit");
   });
 
-  it("hides the release note when no duration is set", () => {
+  it("keeps releasing with no time limit when duration is blank", () => {
     render({ ri_duration: "", ri_schedule_interval: "10m", ri_total_amount: 300 });
     const text = container.textContent ?? "";
     expect(text).not.toContain("Schedule slices");
     expect(text).not.toContain("every 10m");
-    expect(text).toContain("all at once");
+    expect(text).not.toContain("all at once");
+    expect(text).toContain("Each slice goes out one interval after the previous slice fully fills");
+    expect(text).toContain("No time limit; runs until the full amount fills");
   });
 
   it("tells the user a single stop loss is a market order", () => {
@@ -150,7 +154,7 @@ describe("range iceberg exits", () => {
     );
     expect(icebergBox).toBeUndefined();
     expect(container.textContent).toContain(
-      "One order at a time. The next is placed after the previous one fills. A new share is released every 1m.",
+      "One order at a time. The next is placed after the previous one fills.",
     );
     expect(container.textContent).not.toContain("orders shown at once");
     const advanced = [...container.querySelectorAll("button")].find((el) => el.textContent === "Advanced");
@@ -188,14 +192,17 @@ describe("range iceberg exits", () => {
     expect(options.some((label) => /ladder/i.test(label))).toBe(false);
   });
 
-  it("shows schedule start and expiry only with the duration", () => {
+  it("shows schedule start with a duration or an interval", () => {
     render({ ri_duration: "", ri_schedule_interval: "" });
     expect(container.textContent).toContain("Expiry, from submit");
     expect(container.textContent).not.toContain("Schedule start");
     expect(container.textContent).not.toContain("Catch up");
+    render({ ri_duration: "", ri_schedule_interval: "30s" });
+    expect(container.textContent).toContain("Schedule start");
+    expect(container.textContent).not.toContain("Catch up");
     render({ ri_duration: "10m", ri_schedule_interval: "2m", ri_schedule_start: "SUBMIT" });
     expect(container.textContent).toContain("Schedule start");
-    expect(container.textContent).toContain("The clock starts when you submit");
+    expect(container.textContent).toContain("The duration clock starts when you submit");
     expect(container.textContent).toContain("Catch up");
   });
 

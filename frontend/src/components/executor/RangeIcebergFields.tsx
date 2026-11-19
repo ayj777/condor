@@ -360,17 +360,18 @@ export function RangeIcebergFields({
     duration: state.ri_duration,
     interval: state.ri_schedule_interval,
     total: sent.error ? state.ri_total_amount : sent.total,
+    sliceAmount: state.ri_slice_amount,
+    levels: state.ri_levels,
     unit: state.ri_size_unit,
     baseSymbol,
     quoteSymbol,
     price: state.ri_mode === "UP_TO" ? (state.ri_limit_price > 0 ? state.ri_limit_price : null) : null,
     baseTotal: !sent.error && state.ri_size_unit === "QUOTE" ? sent.baseTotal : null,
-    catchUp: state.ri_catch_up,
   });
   const childLine = preview
     ? [formatTokenAmount(preview.perSlice), unitSymbol].filter(Boolean).join(" ")
     : "";
-  const pacing = oneAtATimeText(state.ri_visible_count, state.ri_duration, state.ri_schedule_interval);
+  const pacing = oneAtATimeText(state.ri_visible_count);
   const jitter = jitterNote(input);
   const stopTrigger = state.ri_sl_enabled
     ? exitTriggerPrice(
@@ -483,7 +484,7 @@ export function RangeIcebergFields({
         placeholder="30s"
         onChange={(v) => set("ri_schedule_interval", v)}
       />
-      {state.ri_duration.trim() && (
+      {(state.ri_duration.trim() || state.ri_schedule_interval.trim()) && (
         <>
           <SelectField
             label="Schedule start"
