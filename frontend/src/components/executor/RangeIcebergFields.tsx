@@ -1,6 +1,6 @@
 import { useState } from "react";
 
-import { formatTokenAmount, orderStep, roundDownNote, sizeUnitChoices, type SizeRule } from "@/lib/order-size";
+import { approximateQuoteLabel, formatTokenAmount, orderStep, roundDownNote, sizeUnitChoices, type SizeRule } from "@/lib/order-size";
 import {
   exitPreviewText,
   exitReference,
@@ -310,6 +310,20 @@ export function RangeIcebergFields({
     ? (price > 0 ? state.ri_total_amount / price : 0)
     : state.ri_total_amount;
   const rounded = sent.error ? null : roundDownNote(requestedBase, sent.total, baseSymbol);
+  const sentBaseText = [formatTokenAmount(sent.total), baseSymbol].filter(Boolean).join(" ");
+  const sentQuote = !sent.error && price > 0 ? approximateQuoteLabel(sent.total, price, quoteSymbol) : "";
+  const totalLine = sent.error
+    ? [formatTokenAmount(preview?.total ?? 0), unitSymbol].filter(Boolean).join(" ")
+    : state.ri_size_unit === "QUOTE"
+      ? `${[formatTokenAmount(state.ri_total_amount), quoteSymbol].filter(Boolean).join(" ")}, about ${sentBaseText}${sentQuote && Math.abs((sent.total * price) - state.ri_total_amount) > Math.max(1e-8, state.ri_total_amount * 1e-6) ? ` (${sentQuote})` : ""}`
+      : sentQuote
+        ? `${sentBaseText} (${sentQuote})`
+        : sentBaseText;
+  const sliceLine = sent.error
+    ? [formatTokenAmount(preview?.perSlice ?? 0), unitSymbol].filter(Boolean).join(" ")
+    : sentQuote
+      ? `${[formatTokenAmount(sent.perSlice), baseSymbol].filter(Boolean).join(" ")} (${approximateQuoteLabel(sent.perSlice, price, quoteSymbol)})`
+      : [formatTokenAmount(sent.perSlice), baseSymbol].filter(Boolean).join(" ");
 
   return (
     <div className="space-y-2.5">
@@ -436,8 +450,8 @@ export function RangeIcebergFields({
       {preview && (
         <div className="rounded border border-[var(--color-border)] bg-[var(--color-bg)] px-2.5 py-2 text-[10px] text-[var(--color-text-muted)]">
           <p className="font-medium text-[var(--color-text)]">Preview</p>
-          <p>Total {formatTokenAmount(sent.error ? preview.total : sent.total)} {sent.error ? unitSymbol : baseSymbol}</p>
-          <p>Per slice {formatTokenAmount(sent.error ? preview.perSlice : sent.perSlice)} {sent.error ? unitSymbol : baseSymbol} across {preview.sliceCount}</p>
+          <p>Total {totalLine}</p>
+          <p>Per slice {sliceLine} across {preview.sliceCount}</p>
           <p>Interval {formatInterval(preview.intervalSeconds)}</p>
           <p>Max price {preview.maxPrice ?? "not set"}</p>
           {sent.error && <p className="text-[var(--color-red)]">{sent.error}</p>}

@@ -144,6 +144,7 @@ describe("range iceberg edit dialog", () => {
     setInput("Total amount", "10");
     click("Save");
     expect(container.textContent).toContain("Total amount cannot be below the filled amount");
+    expect(container.textContent).toContain("approx 0.8 USDT");
     expect(submitted).toEqual([]);
   });
 
@@ -160,6 +161,7 @@ describe("range iceberg edit dialog", () => {
     );
     expect(container.textContent).toContain("Total amount (USDT)");
     expect(container.textContent).toContain("Filled 40 AIOT");
+    expect(container.textContent).toContain("approx 3.2 USDT");
     setInput("Total amount", "10");
     click("Save");
     expect(container.textContent).not.toContain("cannot be below the filled amount");

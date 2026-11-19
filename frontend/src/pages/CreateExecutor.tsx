@@ -64,7 +64,7 @@ import {
   LOOKBACK_OPTIONS,
 } from "@/lib/gridExecutor";
 import { formatConnectorName, formatPriceSig } from "@/lib/formatters";
-import { baseAmountError, legalBaseAmount } from "@/lib/order-size";
+import { baseAmountError, legalBaseAmount, plainOrderPrice, plainOrderSentSize, plainOrderSummary } from "@/lib/order-size";
 import { applyHedge, applyReducing, canonicalPositionMode, claimInflight, ICEBERG_MARGIN_HOLD, icebergCreateHeld, isHedge, marginForOpen, MARGIN_CHOOSE, orderCap, ordersBlockCreate, positionModeBlocksCreate, sideHasOpenPosition, type HedgeBooks, type OpenBook } from "@/lib/trade-guards";
 import { useViewFacts } from "@/lib/viewFacts";
 
@@ -256,6 +256,32 @@ export function CreateExecutor() {
   const { executors: mainExecutors, overlays: mainOverlays, positions: mainPositions, isLoadingPositions, isPositionsError } =
     useMainControllerData(server, connector, pair);
 
+  // Current price. /market/prices only answers for a Hummingbot connector, so a
+  // venue without that trait reads the last close off the candle stream instead. The store is
+  // a singleton over one shared channel and TradeChart already subscribes with these
+  // exact arguments, so this costs no extra connection.
+  const { data: priceData } = useQuery({
+    queryKey: ["price", server, connector, pair],
+    queryFn: () => api.getPrice(server!, connector, pair),
+    enabled: !!server && !!connector && !!pair && caps.hasRestPrice,
+    refetchInterval: 5000,
+  });
+
+  // Only the last close is read, so only the last close is subscribed: a fresh
+  // candle array once a second would re-render this page — chart wrapper, every
+  // config panel, the bottom pane — under the user's hands for a scalar that a
+  // REST-priced venue never even reads. Gating the server on the capability
+  // keeps a CLOB page off the stream entirely; TradeChart holds the channel's
+  // own refcounted subscription either way, so the wire is unchanged.
+  const lastClose = useLastClose(
+    caps.hasRestPrice ? null : (server ?? null),
+    connector,
+    pair,
+    gridState.interval,
+  );
+
+  const currentPrice = !caps.hasRestPrice ? lastClose : (priceData?.mid_price ?? null);
+
   const rulesData = useTradingRules(server ?? "", connector, caps.hasTradingRules);
   const pairRule = useMemo(() => {
     const rule = rulesData?.rules?.find((r) => r.trading_pair === pair);
@@ -269,9 +295,10 @@ export function CreateExecutor() {
     };
   }, [rulesData, pair]);
   const baseSymbol = pair?.split("-")[0] || "";
+  const quoteSymbol = pair?.split("-")[1] || "";
   // After the rule: the amount check and the snapped size both read it, and a
   // hook above this line would close over a rule from the previous pair.
-  const orderConfig = useOrderConfig(pairRule, baseSymbol);
+  const orderConfig = useOrderConfig(pairRule, baseSymbol, quoteSymbol, currentPrice);
   // The Iceberg tab is the range-iceberg strategy. Setting it during render
   // means the first frame the user can click already submits that executor,
   // rather than a plain order left over from the Order tab.
@@ -418,33 +445,6 @@ export function CreateExecutor() {
     lpConfig.dispatch({ type: "SET_PAIR", value: pair });
   }, [pair]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Current price. /market/prices only answers for a Hummingbot connector, so a
-  // venue without that trait reads the last close off the candle stream instead. The store is
-  // a singleton over one shared channel and TradeChart already subscribes with these
-  // exact arguments, so this costs no extra connection.
-  const { data: priceData } = useQuery({
-    queryKey: ["price", server, connector, pair],
-    queryFn: () => api.getPrice(server!, connector, pair),
-    enabled: !!server && !!connector && !!pair && caps.hasRestPrice,
-    refetchInterval: 5000,
-  });
-
-  // Only the last close is read, so only the last close is subscribed: a fresh
-  // candle array once a second would re-render this page — chart wrapper, every
-  // config panel, the bottom pane — under the user's hands for a scalar that a
-  // REST-priced venue never even reads. Gating the server on the capability
-  // keeps a CLOB page off the stream entirely; TradeChart holds the channel's
-  // own refcounted subscription either way, so the wire is unchanged.
-  const lastClose = useLastClose(
-    caps.hasRestPrice ? null : (server ?? null),
-    connector,
-    pair,
-    gridState.interval,
-  );
-
-  const currentPrice = !caps.hasRestPrice ? lastClose : (priceData?.mid_price ?? null);
-
-
   // Price precision
   const pricePrecision = useMemo(() => {
     if (!rulesData?.rules) return undefined;
@@ -520,6 +520,29 @@ export function CreateExecutor() {
     // The order hook already applies the pair's step. Position amounts are
     // base too, and a 0.001 remembered from another venue must not enable a
     // MEXC create that the exchange will reject.
+    if (executorType === "order" && orderConfig.state.execution_strategy !== "RANGE_ICEBERG") {
+      const cap = orderCap(
+        canonicalPositionMode(positionModeQuery.data?.position_mode ?? ""),
+        hedgeBooks,
+        openBook,
+        orderConfig.state.position_action,
+        orderConfig.state.side,
+      );
+      const sent = plainOrderSentSize(
+        orderConfig.state.amount,
+        orderConfig.state.amount_unit,
+        plainOrderPrice(orderConfig.state.execution_strategy, orderConfig.state.price, currentPrice),
+        pairRule,
+        cap,
+        { base: baseSymbol, quote: quoteSymbol },
+      );
+      if (sent.error) {
+        return {
+          valid: false,
+          errors: [sent.error, ...base.errors.filter((error) => error !== sent.error)],
+        };
+      }
+    }
     if (executorType !== "position" || !pairRule) return base;
     const message = baseAmountError(positionConfig.state.amount, pairRule, baseSymbol);
     if (!message || message.startsWith("Amount required")) return base;
@@ -527,7 +550,7 @@ export function CreateExecutor() {
       valid: false,
       errors: [message, ...base.errors.filter((e) => !e.startsWith("Amount"))],
     };
-  }, [executorType, gridConfig.validation, positionConfig.validation, positionConfig.state.amount, orderConfig.validation, dcaConfig.validation, lpConfig.validation, pairRule, baseSymbol]);
+  }, [executorType, gridConfig.validation, positionConfig.validation, positionConfig.state.amount, orderConfig.validation, orderConfig.state.amount, orderConfig.state.amount_unit, orderConfig.state.execution_strategy, orderConfig.state.price, orderConfig.state.position_action, orderConfig.state.side, dcaConfig.validation, lpConfig.validation, pairRule, baseSymbol, quoteSymbol, currentPrice, hedgeBooks, openBook, positionModeQuery.data?.position_mode]);
 
   // What the form currently says, for the chat bubble (FEAT-060/FEAT-072).
   //
@@ -577,6 +600,30 @@ export function CreateExecutor() {
                   side: side(orderConfig.state.side),
                   "order type": orderConfig.state.execution_strategy,
                   amount: orderConfig.state.amount,
+                  "size unit": orderConfig.state.amount_unit,
+                  sends: plainOrderSummary(
+                    orderConfig.state.amount,
+                    orderConfig.state.amount_unit,
+                    plainOrderSentSize(
+                      orderConfig.state.amount,
+                      orderConfig.state.amount_unit,
+                      plainOrderPrice(
+                        orderConfig.state.execution_strategy,
+                        orderConfig.state.price,
+                        currentPrice,
+                      ),
+                      pairRule,
+                      orderCap(
+                        canonicalPositionMode(positionModeQuery.data?.position_mode ?? ""),
+                        hedgeBooks,
+                        openBook,
+                        orderConfig.state.position_action,
+                        orderConfig.state.side,
+                      ),
+                      { base: baseSymbol, quote: quoteSymbol },
+                    ),
+                    { base: baseSymbol, quote: quoteSymbol },
+                  ) ?? undefined,
                   price:
                     orderConfig.state.execution_strategy === "MARKET"
                       ? undefined
@@ -1045,6 +1092,7 @@ export function CreateExecutor() {
               pair={pair}
               isSpot={isSpot}
               showOrders={caps.hasOrderBook}
+              markPrice={currentPrice}
               selectedExecutorId={selectedExecutorId}
               onExecutorSelect={(ex) => {
                 setSelectedExecutorId(ex?.id ?? null);

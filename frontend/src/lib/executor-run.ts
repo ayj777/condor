@@ -1,5 +1,11 @@
 import type { ExecutorInfo } from "@/lib/api";
 import { isExecutorActive } from "@/lib/formatters";
+import {
+  approximateQuoteLabel,
+  pairTokens,
+  referenceSizePrice,
+  sizeShownInBase,
+} from "@/lib/order-size";
 
 const STRATEGY_LABELS: Record<string, string> = {
   LIMIT: "Limit",
@@ -94,6 +100,24 @@ export function executorConfigEdit(ex: ExecutorInfo | null | undefined): {
     }
   }
   return { pending, detail, error, note };
+}
+
+/**
+ * Approximate quote for a base-sized fill on an executor card.
+ *
+ * Quote-sized and contract-sized rows are left alone. The price is the
+ * average fill, or the mid when nothing has filled.
+ */
+export function executorBaseSizeNote(ex: ExecutorInfo, mark?: number | null): string {
+  const info = (ex.custom_info ?? {}) as Record<string, unknown>;
+  const cfg = (ex.config ?? {}) as Record<string, unknown>;
+  const iceberg = (ex.type || "").toLowerCase().includes("range_iceberg");
+  const unit = String(cfg.size_unit ?? info.size_unit ?? "");
+  if (!sizeShownInBase(unit, iceberg ? "iceberg" : "order")) return "";
+  const filled = Number(info.filled_base ?? info.filled_amount);
+  if (!(filled > 0)) return "";
+  const price = referenceSizePrice([info, cfg, { current_price: ex.current_price }], mark);
+  return approximateQuoteLabel(filled, price, pairTokens(ex.trading_pair).quote);
 }
 
 /** Filled size, halt reason, and whether resume is meaningful for this row. */

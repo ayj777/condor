@@ -7,6 +7,7 @@ import { ErrorToast } from "@/components/executor/ExecutorSuccessModal";
 import { positionSideNotice } from "@/lib/api-error";
 import type { ExecutorInfo } from "@/lib/api";
 import { exitReference } from "@/lib/range-iceberg";
+import { approximateQuoteLabel, pairTokens, referenceSizePrice } from "@/lib/order-size";
 import {
   draftFromOrderState,
   normalizedEditDraft,
@@ -15,6 +16,7 @@ import {
   rangeIcebergEditPatch,
   rangeIcebergFilledCaption,
   rangeIcebergFilledInUnit,
+  rangeIcebergSizeUnit,
   rangeIcebergTotalUnitLabel,
   validateRangeIcebergEdit,
 } from "@/lib/range-iceberg-edit";
@@ -27,18 +29,35 @@ export function RangeIcebergEditDialog({
   executor,
   pending,
   error,
+  markPrice = null,
   onClose,
   onSubmit,
 }: {
   executor: ExecutorInfo;
   pending: boolean;
   error: string | null;
+  /** Mid or last price, used when the executor has no average fill. */
+  markPrice?: number | null;
   onClose: () => void;
   onSubmit: (body: Record<string, unknown>) => void;
 }) {
   const filled = rangeIcebergFilledInUnit(executor);
   const filledCaption = rangeIcebergFilledCaption(executor, executor.trading_pair);
   const totalUnit = rangeIcebergTotalUnitLabel(executor, executor.trading_pair);
+  const { base, quote } = pairTokens(executor.trading_pair);
+  const sizeUnit = rangeIcebergSizeUnit(executor);
+  const sizePrice = referenceSizePrice(
+    [executor.custom_info, executor.config, { current_price: executor.current_price }],
+    markPrice,
+  );
+  const filledBase = sizeUnit === "BASE"
+    ? filled
+    : filledCaption.endsWith(base)
+      ? Number(executor.custom_info?.filled_base)
+      : null;
+  const filledNote = filledBase != null && filledBase > 0
+    ? approximateQuoteLabel(filledBase, sizePrice, quote)
+    : "";
   const before = normalizedEditDraft(rangeIcebergEditFromExecutor(executor));
   const [state, dispatch] = useReducer(orderReducer, before, orderStateForEdit);
   const [localError, setLocalError] = useState<string | null>(null);
@@ -75,7 +94,7 @@ export function RangeIcebergEditDialog({
         </p>
         {filledCaption && (
           <p className="mt-1 font-mono text-[11px] text-[var(--color-text-muted)]">
-            Filled {filledCaption}
+            Filled {filledCaption}{filledNote ? ` (${filledNote})` : ""}
           </p>
         )}
         <div className="mt-3 space-y-2.5">
@@ -87,6 +106,11 @@ export function RangeIcebergEditDialog({
             step={0.001}
             min={0}
           />
+          {sizeUnit === "BASE" && state.ri_total_amount > 0 && sizePrice != null && sizePrice > 0 && (
+            <p className="text-[10px] text-[var(--color-text-muted)]">
+              {approximateQuoteLabel(state.ri_total_amount, sizePrice, quote)}
+            </p>
+          )}
           {draft.mode === "RANGE" && (
             <>
               <PriceField

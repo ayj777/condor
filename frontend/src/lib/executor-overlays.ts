@@ -1,6 +1,12 @@
 import type { ExecutorInfo } from "./api";
 import { executorTypeLabel, rangeIcebergMode } from "./executor-run";
 import { escapeHtml, formatPriceSig } from "./formatters";
+import {
+  approximateQuoteLabel,
+  pairTokens,
+  referenceSizePrice,
+  sizeShownInBase,
+} from "./order-size";
 import { getThemeColors, pnlHexColor, sideColor } from "./theme-colors";
 
 // ── Overlay Model ──
@@ -69,6 +75,8 @@ export interface ExecutorOverlay {
   exitPrice?: number;
   /** Executor custom_info, for fills and pause reasons the config does not hold. */
   customInfo?: Record<string, unknown>;
+  /** Trading pair, so a base size can be labeled with its quote value. */
+  pair?: string;
 }
 
 // ── Helpers ──
@@ -174,6 +182,7 @@ function baseOverlay(
     timeRange: range,
     config: executor.config,
     customInfo: executor.custom_info,
+    pair: executor.trading_pair,
     ...extras,
   };
 }
@@ -808,12 +817,19 @@ export function renderOverlayTooltipHtml(
     }
   }
 
+  const sizePrice = referenceSizePrice([o.customInfo, cfg]);
+  const quote = pairTokens(o.pair).quote;
+  const quoteNote = (amount: number, kind: "iceberg" | "order", unit: string) =>
+    sizeShownInBase(unit, kind) ? approximateQuoteLabel(amount, sizePrice, quote) : "";
+
   if (o.type === "range_iceberg") {
     const info = o.customInfo || {};
     const filled = Number(info.filled_amount);
     const total = Number(info.target_amount ?? cfg.total_amount);
     if (Number.isFinite(filled)) {
-      addRow("Filled", Number.isFinite(total) && total > 0 ? `${filled} / ${total}` : String(filled));
+      const text = Number.isFinite(total) && total > 0 ? `${filled} / ${total}` : String(filled);
+      const note = quoteNote(filled, "iceberg", String(cfg.size_unit ?? info.size_unit ?? ""));
+      addRow("Filled", note ? `${text} (${note})` : text);
     }
     if (info.unknown_order_halt === true) {
       const reason = typeof info.status_reason === "string" && info.status_reason
@@ -826,7 +842,11 @@ export function renderOverlayTooltipHtml(
 
   if (cfg.leverage != null && Number(cfg.leverage) > 1) addRow("Leverage", `${cfg.leverage}x`);
   if (cfg.total_amount_quote != null) addRow("Amount", formatValue(Number(cfg.total_amount_quote)));
-  else if (cfg.amount != null && Number(cfg.amount) > 0) addRow("Amount", String(cfg.amount));
+  else if (cfg.amount != null && Number(cfg.amount) > 0) {
+    const amount = Number(cfg.amount);
+    const note = quoteNote(amount, o.type === "range_iceberg" ? "iceberg" : "order", String(cfg.size_unit ?? ""));
+    addRow("Amount", note ? `${amount} (${note})` : String(cfg.amount));
+  }
 
   const tp = Number(tripleBarrier.take_profit || cfg.take_profit);
   if (tp > 0 && tp !== -1) addRow("Take Profit", `${(tp * 100).toFixed(2)}%`, green);

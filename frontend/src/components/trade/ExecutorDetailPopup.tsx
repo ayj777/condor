@@ -16,7 +16,7 @@ function inDetail(node: EventTarget | null, id: string): boolean {
 }
 
 /** Hover and keyboard focus for one executor row. The card itself is portalled. */
-function useExecutorHover(executor: ExecutorInfo) {
+function useExecutorHover(executor: ExecutorInfo, markPrice?: number | null) {
   const [anchor, setAnchor] = useState<PopupAnchor | null>(null);
   const rowRef = useRef<HTMLElement | null>(null);
   const open = anchor !== null;
@@ -66,6 +66,7 @@ function useExecutorHover(executor: ExecutorInfo) {
     <ExecutorDetailPopup
       executor={executor}
       anchor={anchor}
+      markPrice={markPrice}
       onMouseLeave={(event) => {
         if (inDetail(event.relatedTarget, executor.id)) return;
         const row = rowRef.current;
@@ -83,15 +84,18 @@ export function ExecutorHoverRow({
   className,
   style,
   onClick,
+  markPrice,
   children,
 }: {
   executor: ExecutorInfo;
   className?: string;
   style?: CSSProperties;
   onClick?: () => void;
+  /** Mid or last price, for an approximate quote next to a base size. */
+  markPrice?: number | null;
   children: ReactNode;
 }) {
-  const { props, popup } = useExecutorHover(executor);
+  const { props, popup } = useExecutorHover(executor, markPrice);
   return (
     <tr {...props} className={className} style={style} onClick={onClick}>
       {children}
@@ -104,15 +108,17 @@ export function ExecutorDetailPopup({
   executor,
   anchor,
   now,
+  markPrice,
   onMouseLeave,
 }: {
   executor: ExecutorInfo;
   anchor: PopupAnchor;
   now?: number;
+  markPrice?: number | null;
   onMouseLeave?: (event: MouseEvent<HTMLDivElement>) => void;
 }) {
   const cardRef = useRef<HTMLDivElement>(null);
-  const model = executorHoverModel(executor, now);
+  const model = executorHoverModel(executor, now, markPrice);
   const [box, setBox] = useState<{ top: number; left: number; maxHeight: number } | null>(null);
 
   useLayoutEffect(() => {

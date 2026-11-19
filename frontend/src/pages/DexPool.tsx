@@ -241,7 +241,8 @@ export function DexPool() {
   const { base: baseSymbol, quote: quoteSymbol } = poolSymbols(pool);
   const balances = usePairBalances(server ?? null, network, baseSymbol, quoteSymbol);
 
-  const orderConfig = useOrderConfig();
+  const currentPrice = pool?.current_price ?? null;
+  const orderConfig = useOrderConfig(null, baseSymbol, quoteSymbol, currentPrice);
   // The pool is pinned by the URL, so the hook is told not to resolve one: its
   // answer would be the pair's deepest pool, which the effect below overrides
   // anyway, bought with a GeckoTerminal request off the budget this page needs.
@@ -297,7 +298,6 @@ export function DexPool() {
     });
 
   const active = tab === "lp" ? lpConfig : orderConfig;
-  const currentPrice = pool?.current_price ?? null;
 
   /**
    * How many decimals the price axis shows.
@@ -621,6 +621,7 @@ export function DexPool() {
               isSpot
               baseSymbol={baseSymbol}
               quoteSymbol={quoteSymbol}
+              markPrice={currentPrice}
               selectedExecutorId={selectedExecutorId}
               onExecutorSelect={(ex) => setSelectedExecutorId(ex?.id ?? null)}
             />

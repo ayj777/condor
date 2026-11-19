@@ -1,7 +1,15 @@
 import type { ExecutorInfo } from "@/lib/api";
 import { formatPriceSig } from "@/lib/formatters";
 import { executorConfigEdit, executorTypeLabel } from "@/lib/executor-run";
-import { formatTokenAmount, sizeUnitSymbol } from "@/lib/order-size";
+import {
+  approximateQuoteLabel,
+  formatTokenAmount,
+  pairTokens,
+  referenceSizePrice,
+  sizeShownInBase,
+  sizeUnitSymbol,
+  withApproximateQuote,
+} from "@/lib/order-size";
 
 export interface HoverOrder {
   price: string;
@@ -198,7 +206,11 @@ function hoverOrders(info: Record<string, unknown>): HoverOrder[] {
 }
 
 /** The order card for one executor row. Empty fields are left out. */
-export function executorHoverModel(executor: ExecutorInfo, now = Date.now()): ExecutorHoverModel {
+export function executorHoverModel(
+  executor: ExecutorInfo,
+  now = Date.now(),
+  markPrice?: number | null,
+): ExecutorHoverModel {
   const cfg = record(executor.config);
   const info = record(executor.custom_info);
   const rows: HoverRow[] = [];
@@ -211,12 +223,24 @@ export function executorHoverModel(executor: ExecutorInfo, now = Date.now()): Ex
   if (mode) add("Mode", mode);
 
   const unit = sizeUnitSymbol(text(first(cfg, info, ["size_unit"])), executor.trading_pair);
+  const { quote } = pairTokens(executor.trading_pair);
+  const sizePrice = referenceSizePrice([info, cfg, { current_price: executor.current_price }], markPrice);
+  const rangeIceberg = (executor.type || "").toLowerCase().includes("range_iceberg");
+  const inBase = sizeShownInBase(text(first(cfg, info, ["size_unit"])), rangeIceberg ? "iceberg" : "order");
   const total = num(pick(cfg, ["total_amount"]) ?? pick(info, ["target_amount"]) ?? pick(cfg, ["amount"]));
   const filled = num(pick(info, ["filled_amount", "filled_base"]));
-  const amountText = (amount: number) => (unit ? `${formatTokenAmount(amount)} ${unit}` : formatTokenAmount(amount));
+  const amountText = (amount: number) => {
+    const plain = unit ? `${formatTokenAmount(amount)} ${unit}` : formatTokenAmount(amount);
+    return inBase ? withApproximateQuote(plain, amount, sizePrice, quote) : plain;
+  };
+  const filledClause = (amount: number, pct: string) => {
+    const note = inBase ? approximateQuoteLabel(amount, sizePrice, quote) : "";
+    const bits = [pct, note].filter(Boolean).join(", ");
+    return `${formatTokenAmount(amount)} filled${bits ? ` (${bits})` : ""}`;
+  };
   if (total != null && total > 0) {
-    const pct = filled != null && filled >= 0 ? ` (${((filled / total) * 100).toFixed(1)}%)` : "";
-    const filledText = filled != null ? `${formatTokenAmount(filled)} filled${pct}` : "";
+    const pct = filled != null && filled >= 0 ? `${((filled / total) * 100).toFixed(1)}%` : "";
+    const filledText = filled != null ? filledClause(filled, pct) : "";
     add("Size", filledText ? `${amountText(total)}, ${filledText}` : amountText(total));
   } else if (filled != null) {
     add("Filled", amountText(filled));
@@ -240,7 +264,7 @@ export function executorHoverModel(executor: ExecutorInfo, now = Date.now()): Ex
   const levelCount = num(cfg.levels) ?? (Array.isArray(info.levels) ? null : num(info.levels));
   if (levelCount != null) add("Levels", String(levelCount));
   const slice = num(first(cfg, info, ["slice_amount"]));
-  if (slice != null && slice > 0) add("Slice", unit ? `${formatTokenAmount(slice)} ${unit}` : formatTokenAmount(slice));
+  if (slice != null && slice > 0) add("Slice", amountText(slice));
 
   const duration = first(cfg, info, ["duration"]);
   const durationSec = durationSeconds(duration);
@@ -281,7 +305,7 @@ export function executorHoverModel(executor: ExecutorInfo, now = Date.now()): Ex
 
   const top = executor as unknown as Record<string, unknown>;
   const stopInPlace = exchangeStopInPlace(info, top);
-  addExitRows(rows, info, executor.trading_pair, stopInPlace);
+  addExitRows(rows, info, executor.trading_pair, stopInPlace, sizePrice);
 
   if (started != null) add("Started", formatStartMyt(started));
 
@@ -407,7 +431,13 @@ function idCount(value: unknown): number {
  * Trigger prices are the executor's own numbers. A percent on the form is only
  * an estimate from the limit or the range mid, so this card does not recompute one.
  */
-function addExitRows(rows: HoverRow[], info: Record<string, unknown>, pair: string, exchangeStop: boolean) {
+function addExitRows(
+  rows: HoverRow[],
+  info: Record<string, unknown>,
+  pair: string,
+  exchangeStop: boolean,
+  sizePrice: number | null,
+) {
   const add = (label: string, value: string) => {
     if (value) rows.push({ label, value });
   };
@@ -442,7 +472,8 @@ function addExitRows(rows: HoverRow[], info: Record<string, unknown>, pair: stri
   const [base, quote] = (pair || "").split("-");
   const amountText = (amount: number) => {
     const formatted = formatTokenAmount(amount);
-    return base ? `${formatted} ${base}` : formatted;
+    const plain = base ? `${formatted} ${base}` : formatted;
+    return withApproximateQuote(plain, amount, sizePrice, quote || "");
   };
   // Prices the executor is using. A percent stays absent until a fill exists,
   // because the executor measures it from the average fill. This card does not
