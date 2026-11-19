@@ -23,7 +23,7 @@ let container: HTMLDivElement;
 let root: Root;
 let dispatched: OrderAction[];
 
-function render(patch: Partial<OrderState> = {}) {
+function render(patch: Partial<OrderState> = {}, hedge = false) {
   const state: OrderState = {
     ...ORDER_DEFAULTS,
     execution_strategy: "RANGE_ICEBERG",
@@ -41,6 +41,7 @@ function render(patch: Partial<OrderState> = {}) {
         sizeRule={null}
         baseSymbol="AIOT"
         quoteSymbol="USDT"
+        hedge={hedge}
       />,
     );
   });
@@ -73,7 +74,7 @@ describe("range iceberg exits", () => {
     expect(checkbox("Stop loss").checked).toBe(false);
     expect(container.textContent).toContain("After full fill");
     expect(container.textContent).toContain("a limit take profit rests and grows with fills");
-    expect(container.textContent).toContain("A market or iceberg take profit waits for its trigger price");
+    expect(container.textContent).toContain("A market or iceberg take profit cancels the remaining entry");
     expect(container.textContent).not.toContain("protect a partial fill");
     expect(container.textContent).not.toContain("Percent");
     expect(container.textContent).not.toContain("A single stop loss sends a market order.");
@@ -123,7 +124,7 @@ describe("range iceberg exits", () => {
     const text = container.textContent ?? "";
     expect(text).not.toContain("Schedule slices");
     expect(text).toContain("6 slices, about 50 USDT (\u2248 625 AIOT) every 10m");
-    expect(text).toContain("Unfilled size carries into the next interval");
+    expect(text).toContain("a missed slice is placed later");
   });
 
   it("hides the release note when no duration is set", () => {
@@ -138,5 +139,65 @@ describe("range iceberg exits", () => {
     render({ ri_sl_enabled: true, ri_sl_execution: "SINGLE" });
     expect(container.textContent).toContain("A single stop loss sends a market order.");
     expect(container.querySelector('button[aria-label="Order type"]')).toBeNull();
+  });
+
+  it("hides visible count until iceberg is on and says how many orders can rest", () => {
+    render({ ri_iceberg: true, ri_visible_count: 2, ri_levels: 10 });
+    expect(container.textContent).toContain("Visible count");
+    expect(container.textContent).toContain("2 orders can rest at once");
+    render({ ri_iceberg: false, ri_levels: 10, ri_duration: "", ri_schedule_interval: "" });
+    expect(container.textContent).not.toContain("Visible count");
+    expect(container.textContent).toContain("10 orders can rest at once");
+  });
+
+  it("shows schedule start and expiry only with the duration", () => {
+    render({ ri_duration: "", ri_schedule_interval: "" });
+    expect(container.textContent).toContain("Expiry, from submit");
+    expect(container.textContent).not.toContain("Schedule start");
+    expect(container.textContent).not.toContain("Catch up");
+    render({ ri_duration: "10m", ri_schedule_interval: "2m", ri_schedule_start: "SUBMIT" });
+    expect(container.textContent).toContain("Schedule start");
+    expect(container.textContent).toContain("The clock starts when you submit");
+    expect(container.textContent).toContain("Catch up");
+  });
+
+  it("hides the hedge reduce-only toggle", () => {
+    render({ ri_mode: "UP_TO" }, true);
+    expect(container.textContent).toContain("Open adds a position");
+    expect(container.textContent).not.toContain("Reduce only");
+  });
+
+  it("hides distribution, weight, and max slippage on an up-to order", () => {
+    render({ ri_mode: "UP_TO", ri_show_advanced: true });
+    expect(container.textContent).not.toContain("Distribution");
+    expect(container.textContent).not.toContain("Max slippage");
+    expect(container.textContent).toContain("Repeats the jitter sequence");
+  });
+
+  it("labels weight and warns that a zero interval sends orders back to back", () => {
+    render({
+      ri_mode: "RANGE",
+      ri_price_low: 0.07,
+      ri_price_high: 0.09,
+      ri_show_advanced: true,
+      ri_min_order_interval: 0,
+    });
+    expect(container.textContent).toContain("more size at the high end");
+    expect(container.textContent).toContain("0 sends orders back to back");
+    expect(container.textContent).toContain("Exit orders are not post only");
+  });
+
+  it("shows the exchange stop and the 30s fallback", () => {
+    render({
+      ri_mode: "UP_TO",
+      ri_limit_price: 0.08,
+      ri_sl_enabled: true,
+      ri_sl_trigger: "price",
+      ri_sl_price: 0.07,
+    });
+    const text = container.textContent ?? "";
+    expect(text).toContain("0.5% past this trigger");
+    expect(text).toContain("30s");
+    expect(text).toContain("cancels the remaining entry");
   });
 });

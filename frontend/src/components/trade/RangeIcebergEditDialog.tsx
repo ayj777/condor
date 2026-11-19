@@ -1,6 +1,6 @@
 import { useReducer, useState } from "react";
 
-import { ExitEditor } from "@/components/executor/RangeIcebergFields";
+import { ExitEditor, rangeBound } from "@/components/executor/RangeIcebergFields";
 import { NumberField, PriceField } from "@/components/executor/fields";
 import { orderReducer } from "@/components/executor/order-config";
 import { ErrorToast } from "@/components/executor/ExecutorSuccessModal";
@@ -12,6 +12,8 @@ import {
   draftFromOrderState,
   normalizedEditDraft,
   orderStateForEdit,
+  frozenIcebergLines,
+  liveSliceAmount,
   rangeIcebergEditFromExecutor,
   rangeIcebergEditPatch,
   rangeIcebergFilledCaption,
@@ -42,6 +44,8 @@ export function RangeIcebergEditDialog({
   onSubmit: (body: Record<string, unknown>) => void;
 }) {
   const filled = rangeIcebergFilledInUnit(executor);
+  const sliceAmount = liveSliceAmount(executor);
+  const frozen = frozenIcebergLines(executor, executor.trading_pair);
   const filledCaption = rangeIcebergFilledCaption(executor, executor.trading_pair);
   const totalUnit = rangeIcebergTotalUnitLabel(executor, executor.trading_pair);
   const { base, quote } = pairTokens(executor.trading_pair);
@@ -72,7 +76,7 @@ export function RangeIcebergEditDialog({
   const kind = draft.mode === "UP_TO" ? "limit iceberg" : "range iceberg";
 
   function save() {
-    const problem = validateRangeIcebergEdit(draft, filled);
+    const problem = validateRangeIcebergEdit(draft, filled, sliceAmount);
     if (problem) {
       setLocalError(problem);
       return;
@@ -96,6 +100,13 @@ export function RangeIcebergEditDialog({
           <p className="mt-1 font-mono text-[11px] text-[var(--color-text-muted)]">
             Filled {filledCaption}{filledNote ? ` (${filledNote})` : ""}
           </p>
+        )}
+        {frozen.length > 0 && (
+          <div className="mt-2 space-y-0.5 text-[11px] text-[var(--color-text-muted)]">
+            {frozen.map((line) => (
+              <p key={line}>{line}</p>
+            ))}
+          </div>
         )}
         <div className="mt-3 space-y-2.5">
           <NumberField
@@ -139,6 +150,7 @@ export function RangeIcebergEditDialog({
             state={state}
             dispatch={dispatch}
             reference={reference}
+            bound={rangeBound(state, "take_profit")}
           />
           <ExitEditor
             title="Stop loss"
@@ -148,6 +160,7 @@ export function RangeIcebergEditDialog({
             state={state}
             dispatch={dispatch}
             reference={reference}
+            bound={rangeBound(state, "stop_loss")}
           />
         </div>
         {localError && (

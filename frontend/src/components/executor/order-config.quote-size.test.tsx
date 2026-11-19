@@ -11,7 +11,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { ORDER_DEFAULTS_KEY } from "@/lib/sessionState";
 
-import { ORDER_DEFAULTS, ORDER_SIZE_UNIT_VERSION, useOrderConfig } from "./order-config";
+import { FORM_DEFAULTS_VERSION, ORDER_DEFAULTS, ORDER_SIZE_UNIT_VERSION, useOrderConfig } from "./order-config";
 
 declare global {
   var IS_REACT_ACT_ENVIRONMENT: boolean;
@@ -160,6 +160,97 @@ describe("schedule interval defaults", () => {
     const config = latest.buildPayload("mexc", "AIOT-USDT", true).config;
     expect(config.duration).toBe("10m");
     expect(config.schedule_interval).toBe("2m");
+    expect(config.schedule_start).toBe("SUBMIT");
     expect(config).not.toHaveProperty("schedule_slices");
+  });
+});
+
+describe("iceberg form defaults", () => {
+  it("starts with iceberg on and schedule start at submit", () => {
+    expect(ORDER_DEFAULTS.ri_iceberg).toBe(true);
+    expect(ORDER_DEFAULTS.ri_schedule_start).toBe("SUBMIT");
+    render();
+    expect(latest.state.ri_iceberg).toBe(true);
+    expect(latest.state.ri_schedule_start).toBe("SUBMIT");
+  });
+
+  it("turns a saved iceberg off into the new default", () => {
+    localStorage.setItem(ORDER_DEFAULTS_KEY, JSON.stringify({
+      size_unit_version: ORDER_SIZE_UNIT_VERSION,
+      ri_iceberg: false,
+      ri_size_unit: "QUOTE",
+    }));
+    render();
+    expect(latest.state.ri_iceberg).toBe(true);
+    const migrated = JSON.parse(localStorage.getItem(ORDER_DEFAULTS_KEY) ?? "{}") as Record<string, unknown>;
+    expect(migrated.form_defaults_version).toBe(FORM_DEFAULTS_VERSION);
+    expect(migrated.ri_iceberg).toBe(true);
+  });
+
+  it("keeps an explicit iceberg off after the default changed", () => {
+    localStorage.setItem(ORDER_DEFAULTS_KEY, JSON.stringify({
+      size_unit_version: ORDER_SIZE_UNIT_VERSION,
+      form_defaults_version: FORM_DEFAULTS_VERSION,
+      ri_iceberg: false,
+      ri_size_unit: "QUOTE",
+    }));
+    render();
+    expect(latest.state.ri_iceberg).toBe(false);
+  });
+
+  it("keeps first fill for a saved duration that never chose a start", () => {
+    localStorage.setItem(ORDER_DEFAULTS_KEY, JSON.stringify({
+      size_unit_version: ORDER_SIZE_UNIT_VERSION,
+      ri_duration: "10m",
+      ri_schedule_interval: "2m",
+      ri_size_unit: "QUOTE",
+    }));
+    render();
+    expect(latest.state.ri_schedule_start).toBe("FIRST_FILL");
+  });
+
+  it("reads a saved jitter above 1 as a percent and keeps a fraction", () => {
+    localStorage.setItem(ORDER_DEFAULTS_KEY, JSON.stringify({
+      form_defaults_version: FORM_DEFAULTS_VERSION,
+      size_unit_version: ORDER_SIZE_UNIT_VERSION,
+      ri_size_jitter_pct: 5,
+      ri_price_jitter_pct: 0.05,
+      ri_timing_jitter_pct: 150,
+    }));
+    render();
+    expect(latest.state.ri_size_jitter_pct).toBe(0.05);
+    expect(latest.state.ri_price_jitter_pct).toBe(0.05);
+    expect(latest.state.ri_timing_jitter_pct).toBe(1);
+  });
+
+  it("sends a quote range, the typed total, and leverage, with no slice", () => {
+    render();
+    act(() => {
+      latest.dispatch({ type: "ADOPT_LEVERAGE", value: 20 });
+      latest.dispatch({ type: "SET_FIELD", field: "execution_strategy", value: "RANGE_ICEBERG" });
+      latest.dispatch({ type: "SET_FIELD", field: "ri_mode", value: "RANGE" });
+      latest.dispatch({ type: "SET_FIELD", field: "ri_price_low", value: 0.07 });
+      latest.dispatch({ type: "SET_FIELD", field: "ri_price_high", value: 0.09 });
+      latest.dispatch({ type: "SET_FIELD", field: "ri_total_amount", value: 100 });
+      latest.dispatch({ type: "SET_FIELD", field: "ri_size_unit", value: "QUOTE" });
+      latest.dispatch({ type: "SET_FIELD", field: "ri_levels", value: 2 });
+      latest.dispatch({ type: "SET_FIELD", field: "ri_duration", value: "" });
+      latest.dispatch({ type: "SET_FIELD", field: "ri_schedule_interval", value: "" });
+    });
+    const untouched = latest.buildPayload("mexc", "AIOT-USDT", true).config;
+    expect(untouched.size_unit).toBe("QUOTE");
+    expect(untouched.total_amount).toBe(100);
+    expect(untouched.leverage).toBe(20);
+    expect(untouched).not.toHaveProperty("slice_amount");
+    expect(untouched).not.toHaveProperty("schedule_start");
+
+    act(() => {
+      latest.dispatch({ type: "SET_FIELD", field: "leverage", value: 5 });
+      latest.dispatch({ type: "SET_FIELD", field: "ri_slice_amount", value: 25 });
+    });
+    const changed = latest.buildPayload("mexc", "AIOT-USDT", true).config;
+    expect(changed.leverage).toBe(5);
+    expect(changed.slice_amount).toBe(25);
+    expect(changed.size_unit).toBe("QUOTE");
   });
 });

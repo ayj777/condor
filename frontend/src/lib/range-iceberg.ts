@@ -1,12 +1,14 @@
+import { buildRangeLadder, type RangeLadder } from "./range-ladder";
 import { floorBaseAmount, formatTokenAmount, orderStep, type SizeRule } from "./order-size";
 
 /**
  * Client-side twin of `RangeIcebergExecutorConfig`.
  *
  * The validator on the Hummingbot side is the one that rejects a create. This
- * module repeats its rules so the form can say why before the POST, and so the
- * preview (total, per-slice size, interval, max price) matches the executor's
- * own slice math: an explicit slice, else the schedule's count, else `levels`.
+ * module repeats its rules so the form can say why before the POST. A quote
+ * range is sent as quote. The preview converts each rung at that rung's price,
+ * the same split as `ladder.py`. An up-to quote order is also sent as quote.
+ * Its base figure is the limit price, and a better fill buys more base.
  */
 
 export type RangeMode = "RANGE" | "UP_TO";
@@ -14,6 +16,7 @@ export type SizeUnit = "BASE" | "QUOTE" | "CONTRACTS";
 export type CapBehavior = "REST_AT_CAP" | "WAIT";
 export type Distribution = "LINEAR" | "GEOMETRIC" | "WEIGHTED";
 export type CatchUp = "CARRY" | "SKIP";
+export type ScheduleStart = "SUBMIT" | "FIRST_FILL";
 export type MarginMode = "ISOLATED" | "CROSS";
 export type ExitArming = "ON_FULL_FILL" | "ON_ANY_FILL";
 export type ExitTrigger = "percent" | "price";
@@ -58,6 +61,8 @@ export interface RangeIcebergInput {
   duration: string;
   /** Empty releases the whole size at once. Seconds or `10m`. */
   scheduleInterval: string;
+  /** Used only when a duration is set. Submit starts the clock immediately. */
+  scheduleStart: ScheduleStart;
   catchUp: CatchUp;
   capBehavior: CapBehavior;
   leverage: number;
@@ -71,6 +76,8 @@ export interface RangeIcebergInput {
   priceJitterPct: number;
   timingJitterPct: number;
   minOrderInterval: number;
+  /** Empty means no expiry. Seconds or `30m`. Measured from submit. */
+  expiry: string;
   expirySeconds: number;
   maxSlippage: number;
   randomSeed: string;
@@ -105,7 +112,10 @@ export interface RangeIcebergPreview {
   /** Seconds between scheduled slices. Null when the order goes out at once. */
   intervalSeconds: number | null;
   maxPrice: number | null;
+  /** Price rungs for a range, or the child count for an up-to order. */
   sliceCount: number;
+  /** Scheduled releases. Null when the size goes out at once. */
+  releaseCount: number | null;
 }
 
 /**
@@ -162,17 +172,41 @@ function scheduleCount(input: RangeIcebergInput, seconds: number | null): number
   return scheduleSliceCount(seconds, interval);
 }
 
+/** How many orders can rest at once. Iceberg uses the visible count. Otherwise the schedule, else the rungs. */
+export function restingOrderCount(
+  input: Pick<RangeIcebergInput, "iceberg" | "visibleCount" | "levels" | "duration" | "scheduleInterval">,
+): number {
+  if (input.iceberg) return Math.max(1, Math.trunc(input.visibleCount) || 1);
+  const seconds = input.duration.trim() ? parseDuration(input.duration) : null;
+  const interval = input.scheduleInterval.trim() ? parseDuration(input.scheduleInterval) : null;
+  if (seconds != null && interval != null) {
+    const count = scheduleSliceCount(seconds, interval);
+    if (count != null) return count;
+  }
+  return Math.max(1, Math.trunc(input.levels) || 1);
+}
+
+export function restingOrderText(count: number): string {
+  return count === 1 ? "1 order can rest at once." : `${count} orders can rest at once.`;
+}
+
+export function scheduleStartLine(start: ScheduleStart): string {
+  return start === "FIRST_FILL"
+    ? "The clock starts at the first fill. Until then only the first release is placed."
+    : "The clock starts when you submit.";
+}
+
 /** The preview the form shows. Null until a total has been entered. */
 export function rangeIcebergPreview(input: RangeIcebergInput): RangeIcebergPreview | null {
   if (!(input.totalAmount > 0)) return null;
   const seconds = input.duration.trim() ? parseDuration(input.duration) : null;
   const scheduled = scheduleCount(input, seconds);
-  const sliceCount =
-    input.sliceAmount > 0
-      ? Math.max(1, Math.ceil(input.totalAmount / input.sliceAmount))
+  const sliceCount = input.sliceAmount > 0
+    ? Math.max(1, Math.ceil(input.totalAmount / input.sliceAmount))
+    : input.mode === "RANGE"
+      ? Math.max(1, input.levels || 1)
       : scheduled ?? Math.max(1, input.levels || 1);
-  const perSlice =
-    input.sliceAmount > 0 ? input.sliceAmount : input.totalAmount / sliceCount;
+  const perSlice = input.sliceAmount > 0 ? input.sliceAmount : input.totalAmount / sliceCount;
   let intervalSeconds: number | null = null;
   if (seconds != null && input.scheduleInterval.trim()) {
     const parsed = parseDuration(input.scheduleInterval);
@@ -186,7 +220,14 @@ export function rangeIcebergPreview(input: RangeIcebergInput): RangeIcebergPrevi
       : input.limitPrice > 0
         ? input.limitPrice
         : null;
-  return { total: input.totalAmount, perSlice, intervalSeconds, maxPrice, sliceCount };
+  return {
+    total: input.totalAmount,
+    perSlice,
+    intervalSeconds,
+    maxPrice,
+    sliceCount,
+    releaseCount: scheduled,
+  };
 }
 
 /** A decimal the executor accepts, without binary float noise. */
@@ -400,7 +441,42 @@ function validateExits(input: RangeIcebergInput): string | null {
       return "Stop loss price must be above the take profit price for a short";
     }
   }
+  return rangeBoundMessage(input);
+}
+
+/**
+ * A range fill can land at either end. An absolute stop inside the band can
+ * fire while the ladder is still working, and a later edit then rejects it.
+ * An absolute take profit has to clear the worst fill, or the executor skips it.
+ */
+function rangeBoundMessage(input: RangeIcebergInput): string | null {
+  if (input.mode !== "RANGE") return null;
+  const take = input.takeProfit ?? null;
+  const stop = input.stopLoss ?? null;
+  if (take?.trigger === "price" && take.price > 0) {
+    if (input.side === "BUY" && input.priceHigh > 0 && !(take.price > input.priceHigh)) {
+      return "Take profit price must be above price high. A fill at the top of the range would leave it at or below the average";
+    }
+    if (input.side === "SELL" && input.priceLow > 0 && !(take.price < input.priceLow)) {
+      return "Take profit price must be below price low. A fill at the bottom of the range would leave it at or above the average";
+    }
+  }
+  if (stop?.trigger === "price" && stop.price > 0) {
+    if (input.side === "BUY" && input.priceLow > 0 && !(stop.price < input.priceLow)) {
+      return "Stop loss price must be below price low, or it can fire while the ladder is still buying";
+    }
+    if (input.side === "SELL" && input.priceHigh > 0 && !(stop.price > input.priceHigh)) {
+      return "Stop loss price must be above price high, or it can fire while the ladder is still selling";
+    }
+  }
   return null;
+}
+
+/** Shown for an up-to absolute take profit. The average can still miss it. */
+export function upToTakeProfitNote(input: RangeIcebergInput): string | null {
+  const take = input.takeProfit ?? null;
+  if (input.mode !== "UP_TO" || take?.trigger !== "price" || !(take.price > 0)) return null;
+  return "An up-to fill can land on either side of the limit. If the average is not past this price, the take profit is skipped.";
 }
 
 function exitPayload(kind: ExitKind, exit: RangeIcebergExitInput): Record<string, unknown> {
@@ -459,6 +535,8 @@ export function validateRangeIceberg(input: RangeIcebergInput): string | null {
   if (input.sizeJitterPct < 0 || input.priceJitterPct < 0 || input.timingJitterPct < 0) {
     return "Jitter cannot be negative";
   }
+  if (input.sizeJitterPct > 1) return "Size jitter cannot exceed 100%";
+  if (input.priceJitterPct > 1) return "Price jitter cannot exceed 100%";
   if (input.timingJitterPct > 1) return "Timing jitter cannot exceed 100%";
   if (input.minOrderInterval < 0) return "Minimum order interval cannot be negative";
   if (!(input.leverage >= 1)) return "Leverage must be at least 1";
@@ -489,7 +567,13 @@ export function validateRangeIceberg(input: RangeIcebergInput): string | null {
   ) {
     return "Schedule interval cannot be longer than the duration";
   }
-  if (input.expirySeconds < 0) return "Expiry cannot be negative";
+  if (input.expiry.trim()) {
+    const expiry = parseDuration(input.expiry);
+    if (expiry == null) return "Expiry must be seconds or a value like 30m, 24h, 1d";
+    if (!(expiry > 0)) return "Expiry must be greater than 0";
+  } else if (input.expirySeconds < 0) {
+    return "Expiry cannot be negative";
+  }
   if (input.maxSlippage < 0) return "Max slippage cannot be negative";
   if (input.randomSeed.trim() && !/^-?\d+$/.test(input.randomSeed.trim())) {
     return "Random seed must be an integer";
@@ -498,21 +582,70 @@ export function validateRangeIceberg(input: RangeIcebergInput): string | null {
 }
 
 export interface IcebergSent {
+  /** Amount in `sizeUnit` that the create sends. */
   total: number;
-  perSlice: number;
-  sliceCount: number;
-  /** BASE after a quote conversion, so the executor does not convert again. */
-  sizeUnit?: "BASE" | "QUOTE" | "CONTRACTS";
+  sizeUnit: SizeUnit;
+  /** Base the ladder would place, or the limit estimate for an up-to order. */
+  baseTotal: number;
+  /** Quote the order spends, when it is known. */
+  quoteTotal: number | null;
+  /** Rungs a range kept after rounding. Null for an up-to order. */
+  rungs: number | null;
   error: string | null;
+}
+
+function failedSent(message: string): IcebergSent {
+  return { total: 0, sizeUnit: "BASE", baseTotal: 0, quoteTotal: null, rungs: null, error: message };
+}
+
+function ladderFor(input: RangeIcebergInput, rule: SizeRule | null, total: number): RangeLadder {
+  return buildRangeLadder({
+    total,
+    unit: input.sizeUnit,
+    priceLow: input.priceLow,
+    priceHigh: input.priceHigh,
+    levels: Math.max(1, Math.trunc(input.levels) || 1),
+    distribution: input.distribution,
+    weight: input.weight,
+    side: input.side,
+    priceStep: rule?.priceIncrement ?? 0,
+    amountStep: orderStep(rule),
+    minAmount: rule?.minOrderSize ?? 0,
+    contractSize: rule?.contractSize,
+  });
+}
+
+/**
+ * Shrink a quote total until the ladder's base fits `maxBase`.
+ * Each pass rebuilds, because rounding is not linear.
+ */
+function fitQuoteToBase(
+  input: RangeIcebergInput,
+  rule: SizeRule | null,
+  maxBase: number,
+): { quote: number; ladder: RangeLadder } {
+  let quote = input.totalAmount;
+  let ladder = ladderFor(input, rule, quote);
+  for (let pass = 0; pass < 8 && ladder.baseTotal > maxBase + 1e-9; pass += 1) {
+    if (!(ladder.baseTotal > 0)) break;
+    quote = Number((quote * (maxBase / ladder.baseTotal)).toPrecision(12));
+    ladder = ladderFor(input, rule, quote);
+  }
+  if (ladder.baseTotal > maxBase + 1e-9) {
+    throw new Error("The close is below the minimum order size");
+  }
+  return { quote, ladder };
 }
 
 /**
  * The size the create will send.
  *
- * Every child is floored to the step. The total is that child times the
- * slice count, so the preview and the payload match. Quote is converted to
- * base with `price` before the floor. Contracts need a second confirm and
- * are floored to whole contracts.
+ * A quote range keeps the typed total and `size_unit` QUOTE. The ladder
+ * converts each rung. An up-to quote order does the same, and the base figure
+ * is the total divided by the limit. A close cap shrinks that quote so the
+ * ladder, or the limit estimate, does not exceed the open base size.
+ * Contracts need a second confirm and are floored to whole contracts.
+ * `price` is only a fallback when an up-to order has no limit yet.
  */
 export function icebergSentSize(
   input: RangeIcebergInput,
@@ -521,75 +654,100 @@ export function icebergSentSize(
   contractsConfirmed: boolean,
   maxBase = 0,
 ): IcebergSent {
-  const raw = rangeIcebergPreview(input);
-  if (!raw) {
-    return { total: 0, perSlice: 0, sliceCount: 0, error: "Total amount is required" };
-  }
+  if (!(input.totalAmount > 0)) return failedSent("Total amount is required");
   if (input.sizeUnit === "CONTRACTS" && !contractsConfirmed) {
-    return {
-      total: raw.total,
-      perSlice: raw.perSlice,
-      sliceCount: raw.sliceCount,
-      error: "Confirm that this size is in contracts, not base coins",
-    };
+    return failedSent("Confirm that this size is in contracts, not base coins");
   }
   if (input.sizeUnit === "CONTRACTS" && !(rule?.contractSize && rule.contractSize > 0)) {
-    return {
-      total: 0,
-      perSlice: 0,
-      sliceCount: raw.sliceCount,
-      error: "Contract size is not known, so this order was not sent",
-    };
+    return failedSent("Contract size is not known, so this order was not sent");
   }
-  let baseTotal = input.totalAmount;
-  if (input.sizeUnit === "QUOTE") {
-    if (!(price > 0)) {
-      return { ...raw, error: "A price is required to convert quote size" };
+
+  if (input.sizeUnit === "CONTRACTS" && rule?.contractSize) {
+    let contracts = Math.floor(input.totalAmount + 1e-9);
+    if (maxBase > 0) {
+      const maxContracts = Math.floor(maxBase / rule.contractSize + 1e-9);
+      if (contracts > maxContracts) contracts = maxContracts;
     }
-    baseTotal = input.totalAmount / price;
-  }
-  if (input.sizeUnit === "CONTRACTS" && rule?.contractSize && maxBase > 0) {
-    const maxContracts = Math.floor(maxBase / rule.contractSize + 1e-9);
-    if (baseTotal > maxContracts) baseTotal = maxContracts;
-  } else if (maxBase > 0 && baseTotal > maxBase) {
-    baseTotal = maxBase;
-  }
-  const step = input.sizeUnit === "CONTRACTS" ? 1 : orderStep(rule);
-  const min = input.sizeUnit === "CONTRACTS" ? 1 : rule?.minOrderSize ?? 0;
-  if (!(step > 0)) {
-    if (input.sizeUnit === "QUOTE") {
-      return {
-        total: baseTotal,
-        perSlice: baseTotal / raw.sliceCount,
-        sliceCount: raw.sliceCount,
-        sizeUnit: "BASE",
-        error: null,
-      };
+    if (contracts < 1) return failedSent("Each slice must be at least 1 after the 1 step");
+    const sized = { ...input, totalAmount: contracts };
+    if (input.mode === "RANGE") {
+      try {
+        const ladder = ladderFor(sized, rule, contracts);
+        return {
+          total: contracts,
+          sizeUnit: "CONTRACTS",
+          baseTotal: ladder.baseTotal,
+          quoteTotal: null,
+          rungs: ladder.levels.length,
+          error: null,
+        };
+      } catch (error) {
+        return failedSent(error instanceof Error ? error.message : "The range ladder is below the minimum order size after rounding.");
+      }
     }
-    const total = maxBase > 0 && input.totalAmount > maxBase ? maxBase : input.totalAmount;
     return {
-      total,
-      perSlice: total / raw.sliceCount,
-      sliceCount: raw.sliceCount,
-      sizeUnit: input.sizeUnit,
+      total: contracts,
+      sizeUnit: "CONTRACTS",
+      baseTotal: Number((contracts * rule.contractSize).toPrecision(12)),
+      quoteTotal: null,
+      rungs: null,
       error: null,
     };
   }
-  const child = floorBaseAmount(baseTotal / raw.sliceCount, step);
-  if (!(child > 0) || (min > 0 && child < min)) {
+
+  if (input.mode === "RANGE") {
+    try {
+      let total = input.totalAmount;
+      let ladder: RangeLadder;
+      if (input.sizeUnit === "QUOTE" && maxBase > 0) {
+        const fitted = fitQuoteToBase(input, rule, maxBase);
+        total = fitted.quote;
+        ladder = fitted.ladder;
+      } else {
+        if (input.sizeUnit === "BASE" && maxBase > 0 && total > maxBase) total = maxBase;
+        ladder = ladderFor(input, rule, total);
+      }
+      return {
+        total,
+        sizeUnit: input.sizeUnit,
+        baseTotal: ladder.baseTotal,
+        quoteTotal: input.sizeUnit === "QUOTE" ? total : ladder.quoteTotal,
+        rungs: ladder.levels.length,
+        error: null,
+      };
+    } catch (error) {
+      return failedSent(error instanceof Error ? error.message : "The range ladder is below the minimum order size after rounding.");
+    }
+  }
+
+  const limit = input.limitPrice > 0 ? input.limitPrice : price;
+  if (input.sizeUnit === "QUOTE") {
+    if (!(limit > 0)) return failedSent("A price is required to convert quote size");
+    let total = input.totalAmount;
+    if (maxBase > 0 && total / limit > maxBase) total = Number((maxBase * limit).toPrecision(12));
     return {
-      total: 0,
-      perSlice: 0,
-      sliceCount: raw.sliceCount,
-      error: `Each slice must be at least ${min} after the ${step} step`,
+      total,
+      sizeUnit: "QUOTE",
+      baseTotal: Number((total / limit).toPrecision(12)),
+      quoteTotal: total,
+      rungs: null,
+      error: null,
     };
   }
-  const sentBase = Number((child * raw.sliceCount).toPrecision(12));
+  let total = input.totalAmount;
+  if (maxBase > 0 && total > maxBase) total = maxBase;
+  const step = orderStep(rule);
+  if (step > 0) total = floorBaseAmount(total, step);
+  const min = rule?.minOrderSize ?? 0;
+  if (!(total > 0) || (min > 0 && total < min)) {
+    return failedSent(`Each slice must be at least ${min} after the ${step || 1} step`);
+  }
   return {
-    total: sentBase,
-    perSlice: child,
-    sliceCount: raw.sliceCount,
-    sizeUnit: input.sizeUnit === "CONTRACTS" ? "CONTRACTS" : "BASE",
+    total,
+    sizeUnit: "BASE",
+    baseTotal: total,
+    quoteTotal: limit > 0 ? Number((total * limit).toPrecision(12)) : null,
+    rungs: null,
     error: null,
   };
 }
@@ -631,12 +789,14 @@ export function rangeIcebergConfig(
   if (input.sizeJitterPct > 0) config.size_jitter_pct = input.sizeJitterPct;
   if (input.priceJitterPct > 0) config.price_jitter_pct = input.priceJitterPct;
   if (input.timingJitterPct > 0) config.timing_jitter_pct = input.timingJitterPct;
-  if (input.expirySeconds > 0) config.expiry_seconds = input.expirySeconds;
+  const expirySeconds = input.expiry.trim() ? parseDuration(input.expiry) : input.expirySeconds;
+  if (expirySeconds != null && expirySeconds > 0) config.expiry_seconds = expirySeconds;
   if (input.maxSlippage > 0) config.max_slippage = input.maxSlippage;
   if (input.randomSeed.trim()) config.random_seed = Number(input.randomSeed.trim());
   if (input.duration.trim()) {
     config.duration = input.duration.trim();
     if (input.scheduleInterval.trim()) config.schedule_interval = input.scheduleInterval.trim();
+    config.schedule_start = input.scheduleStart;
   }
   if (input.takeProfit) config.take_profit = exitPayload("take_profit", input.takeProfit);
   if (input.stopLoss) config.stop_loss = exitPayload("stop_loss", input.stopLoss);
@@ -647,10 +807,11 @@ export function rangeIcebergConfig(
 /**
  * The line under the interval field.
  *
- * Null when no duration is set: the whole size goes out at once, so there is
- * nothing to spell out. Quote and base are both shown when a price can
- * convert them. CARRY adds unfilled size to the next interval. SKIP leaves
- * that size behind.
+ * Null when no duration is set: the whole size goes out at once. A quote
+ * range passes `baseTotal` from the ladder so the base figure is the sum of
+ * the rungs, not the total divided by one price. While the market is outside
+ * the range, Carry places a missed slice later and Skip drops it. An order
+ * already on the book is left to fill.
  */
 export function scheduleNote(args: {
   duration: string;
@@ -661,6 +822,8 @@ export function scheduleNote(args: {
   quoteSymbol: string;
   price: number | null;
   catchUp: CatchUp;
+  /** Ladder base for the whole order. Used instead of `total / price`. */
+  baseTotal?: number | null;
 }): string | null {
   if (!args.duration.trim()) return null;
   const seconds = parseDuration(args.duration);
@@ -679,7 +842,10 @@ export function scheduleNote(args: {
         : args.baseSymbol;
     const amount = [formatTokenAmount(per), symbol].filter(Boolean).join(" ");
     let other = "";
-    if (args.price != null && args.price > 0 && args.unit !== "CONTRACTS") {
+    if (args.unit === "QUOTE" && args.baseTotal != null && args.baseTotal > 0 && args.baseSymbol) {
+      const converted = Number((args.baseTotal / count).toPrecision(12));
+      other = ` (\u2248 ${formatTokenAmount(converted)} ${args.baseSymbol})`;
+    } else if (args.price != null && args.price > 0 && args.unit !== "CONTRACTS") {
       const converted = Number((args.unit === "QUOTE" ? per / args.price : per * args.price).toPrecision(12));
       const otherSymbol = args.unit === "QUOTE" ? args.baseSymbol : args.quoteSymbol;
       if (otherSymbol) other = ` (\u2248 ${formatTokenAmount(converted)} ${otherSymbol})`;
@@ -693,11 +859,42 @@ export function scheduleNote(args: {
   if (count > 1) {
     sentences.push(
       args.catchUp === "SKIP"
-        ? "Unfilled size is left behind. The next interval releases only its own share"
-        : "Unfilled size carries into the next interval",
+        ? "While the market is outside the range, a missed slice is dropped. An order already on the book is left to fill"
+        : "While the market is outside the range, a missed slice is placed later. An order already on the book is left to fill",
     );
   }
   return `${sentences.join(". ")}.`;
+}
+
+/** The executor's default protective stop buffer. The form does not send an override. */
+export const PROTECTIVE_STOP_BUFFER = 0.005;
+/** The executor's default quiet time before a stop iceberg markets the rest. */
+export const STOP_FALLBACK_SECONDS = 30;
+
+/** Exchange stop: long trigger * (1 - buffer), short trigger * (1 + buffer). */
+export function exchangeStopPrice(side: "BUY" | "SELL", trigger: number): number | null {
+  if (!(trigger > 0)) return null;
+  const price = side === "BUY"
+    ? trigger * (1 - PROTECTIVE_STOP_BUFFER)
+    : trigger * (1 + PROTECTIVE_STOP_BUFFER);
+  return Number(price.toPrecision(12));
+}
+
+export function stopProtectionText(side: "BUY" | "SELL", trigger: number | null): string {
+  const exchange = trigger != null ? exchangeStopPrice(side, trigger) : null;
+  const price = exchange != null ? ` at ${formatTokenAmount(exchange)}` : "";
+  return `The exchange stop rests${price}, 0.5% past this trigger. If a stop iceberg gets no fill for ${STOP_FALLBACK_SECONDS}s, the rest is a market order.`;
+}
+
+/** One line for the jitter the children will use. Null when every jitter is 0. */
+export function jitterNote(input: Pick<RangeIcebergInput, "sizeJitterPct" | "priceJitterPct" | "timingJitterPct">): string | null {
+  const parts: string[] = [];
+  if (input.sizeJitterPct > 0) parts.push(`${formatTokenAmount(input.sizeJitterPct * 100)}% size`);
+  if (input.priceJitterPct > 0) parts.push(`${formatTokenAmount(input.priceJitterPct * 100)}% price`);
+  if (input.timingJitterPct > 0) parts.push(`${formatTokenAmount(input.timingJitterPct * 100)}% timing`);
+  if (!parts.length) return null;
+  const exit = input.priceJitterPct > 0 ? " Exit icebergs reuse this price jitter." : "";
+  return `Each child can vary by ${parts.join(", ")}.${exit}`;
 }
 
 export function formatInterval(seconds: number | null): string {

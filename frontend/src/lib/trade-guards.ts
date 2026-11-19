@@ -197,6 +197,7 @@ export function applyHedge(
   const word = trade === "BUY" || trade === "SELL";
   config.side = word ? (wantLong ? "SELL" : "BUY") : wantLong ? 2 : 1;
   for (const key of ["amount", "total_amount"] as const) {
+    if (key === "total_amount" && config.size_unit === "QUOTE") continue;
     const value = config[key];
     if (typeof value === "number" && value > book.amount) config[key] = book.amount;
   }
@@ -241,6 +242,7 @@ export function applyClose(
   config.position_action = "CLOSE";
   config.reduce_only = true;
   for (const key of ["amount", "total_amount"] as const) {
+    if (key === "total_amount" && config.size_unit === "QUOTE") continue;
     const value = config[key];
     if (typeof value === "number" && value > book.amount) config[key] = book.amount;
   }

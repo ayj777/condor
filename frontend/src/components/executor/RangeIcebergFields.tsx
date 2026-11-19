@@ -4,10 +4,17 @@ import { approximateQuoteLabel, formatTokenAmount, orderStep, roundDownNote, siz
 import {
   exitPreviewText,
   exitReference,
+  exitTriggerPrice,
   formatInterval,
   icebergSentSize,
+  jitterNote,
   rangeIcebergPreview,
+  restingOrderCount,
+  restingOrderText,
   scheduleNote,
+  scheduleStartLine,
+  stopProtectionText,
+  upToTakeProfitNote,
   type ExitKind,
   type RangeIcebergExitInput,
 } from "@/lib/range-iceberg";
@@ -37,6 +44,10 @@ const DISTRIBUTION_OPTIONS = [
 const CATCH_UP_OPTIONS = [
   { value: "CARRY", label: "Carry" },
   { value: "SKIP", label: "Skip" },
+];
+const START_OPTIONS = [
+  { value: "SUBMIT", label: "Submit" },
+  { value: "FIRST_FILL", label: "First fill" },
 ];
 const ARM_OPTIONS = [
   { value: "ON_FULL_FILL", label: "After full fill" },
@@ -102,6 +113,7 @@ export function ExitEditor({
   state,
   dispatch,
   reference,
+  bound = null,
 }: {
   title: string;
   kind: ExitKind;
@@ -110,13 +122,18 @@ export function ExitEditor({
   state: OrderState;
   dispatch: React.Dispatch<OrderAction>;
   reference: { price: number; label: string } | null;
+  /** A range wall the absolute trigger must stay on the safe side of. */
+  bound?: { minExclusive?: number; maxExclusive?: number } | null;
 }) {
   const enabled = prefix === "ri_tp" ? state.ri_tp_enabled : state.ri_sl_enabled;
   const draft = exitDraft(state, prefix);
   const name = (field: string) => `${prefix}_${field}`;
   const long = state.side === 1;
   const priceValid = (() => {
-    if (!(draft.price > 0) || !reference) return draft.price > 0;
+    if (!(draft.price > 0)) return false;
+    if (bound?.maxExclusive != null && bound.maxExclusive > 0 && !(draft.price < bound.maxExclusive)) return false;
+    if (bound?.minExclusive != null && bound.minExclusive > 0 && !(draft.price > bound.minExclusive)) return false;
+    if (!reference) return true;
     const above = kind === "take_profit" ? long : !long;
     return above ? draft.price > reference.price : draft.price < reference.price;
   })();
@@ -279,6 +296,22 @@ function TextField({
   );
 }
 
+export function rangeBound(
+  state: OrderState,
+  kind: ExitKind,
+): { minExclusive?: number; maxExclusive?: number } | null {
+  if (state.ri_mode !== "RANGE") return null;
+  const long = state.side === 1;
+  if (kind === "stop_loss") {
+    if (long && state.ri_price_low > 0) return { maxExclusive: state.ri_price_low };
+    if (!long && state.ri_price_high > 0) return { minExclusive: state.ri_price_high };
+    return null;
+  }
+  if (long && state.ri_price_high > 0) return { minExclusive: state.ri_price_high };
+  if (!long && state.ri_price_low > 0) return { maxExclusive: state.ri_price_low };
+  return null;
+}
+
 export function RangeIcebergFields({
   state,
   dispatch,
@@ -287,6 +320,7 @@ export function RangeIcebergFields({
   baseSymbol,
   quoteSymbol,
   maxBase = 0,
+  hedge = false,
 }: {
   state: OrderState;
   dispatch: React.Dispatch<OrderAction>;
@@ -295,6 +329,8 @@ export function RangeIcebergFields({
   baseSymbol: string;
   quoteSymbol: string;
   maxBase?: number;
+  /** Hedge open and close are the only reduce control. The toggle is hidden. */
+  hedge?: boolean;
 }) {
   const [advanced, setAdvanced] = useState(state.ri_show_advanced);
   const set = (field: string, value: unknown) =>
@@ -302,39 +338,49 @@ export function RangeIcebergFields({
   const input = rangeIcebergInput(state);
   const preview = rangeIcebergPreview(input);
   const reference = exitReference(input);
-  const price = state.ri_mode === "UP_TO"
-    ? state.ri_limit_price
-    : Math.max(state.ri_price_low, state.ri_price_high);
-  const sent = icebergSentSize(input, sizeRule, price, state.ri_contracts_confirmed, maxBase);
+  const limitPrice = state.ri_mode === "UP_TO" ? state.ri_limit_price : 0;
+  const sent = icebergSentSize(input, sizeRule, limitPrice, state.ri_contracts_confirmed, maxBase);
   const unitSymbol = state.ri_size_unit === "QUOTE" ? quoteSymbol : baseSymbol;
-  const requestedBase = state.ri_size_unit === "QUOTE"
-    ? (price > 0 ? state.ri_total_amount / price : 0)
-    : state.ri_total_amount;
-  const rounded = sent.error ? null : roundDownNote(requestedBase, sent.total, baseSymbol);
-  const sentBaseText = [formatTokenAmount(sent.total), baseSymbol].filter(Boolean).join(" ");
-  const sentQuote = !sent.error && price > 0 ? approximateQuoteLabel(sent.total, price, quoteSymbol) : "";
+  const shrunk = !sent.error && sent.total > 0 && sent.total + 1e-9 < state.ri_total_amount
+    ? roundDownNote(state.ri_total_amount, sent.total, unitSymbol)
+    : null;
+  const baseText = !sent.error && sent.baseTotal > 0
+    ? [formatTokenAmount(sent.baseTotal), baseSymbol].filter(Boolean).join(" ")
+    : "";
   const totalLine = sent.error
     ? [formatTokenAmount(preview?.total ?? 0), unitSymbol].filter(Boolean).join(" ")
     : state.ri_size_unit === "QUOTE"
-      ? `${[formatTokenAmount(state.ri_total_amount), quoteSymbol].filter(Boolean).join(" ")}, about ${sentBaseText}${sentQuote && Math.abs((sent.total * price) - state.ri_total_amount) > Math.max(1e-8, state.ri_total_amount * 1e-6) ? ` (${sentQuote})` : ""}`
-      : sentQuote
-        ? `${sentBaseText} (${sentQuote})`
-        : sentBaseText;
+      ? `${[formatTokenAmount(sent.total), quoteSymbol].filter(Boolean).join(" ")}${baseText ? `, about ${baseText}` : ""}`
+      : sent.quoteTotal != null && sent.baseTotal > 0 && quoteSymbol
+        ? `${[formatTokenAmount(sent.total), baseSymbol].filter(Boolean).join(" ")} (${approximateQuoteLabel(sent.baseTotal, sent.quoteTotal / sent.baseTotal, quoteSymbol)})`
+        : [formatTokenAmount(sent.total), unitSymbol].filter(Boolean).join(" ");
   const scheduleText = scheduleNote({
     duration: state.ri_duration,
     interval: state.ri_schedule_interval,
-    total: state.ri_total_amount,
+    total: sent.error ? state.ri_total_amount : sent.total,
     unit: state.ri_size_unit,
     baseSymbol,
     quoteSymbol,
-    price: reference?.price ?? null,
+    price: state.ri_mode === "UP_TO" ? (state.ri_limit_price > 0 ? state.ri_limit_price : null) : null,
+    baseTotal: !sent.error && state.ri_size_unit === "QUOTE" ? sent.baseTotal : null,
     catchUp: state.ri_catch_up,
   });
-  const sliceLine = sent.error
-    ? [formatTokenAmount(preview?.perSlice ?? 0), unitSymbol].filter(Boolean).join(" ")
-    : sentQuote
-      ? `${[formatTokenAmount(sent.perSlice), baseSymbol].filter(Boolean).join(" ")} (${approximateQuoteLabel(sent.perSlice, price, quoteSymbol)})`
-      : [formatTokenAmount(sent.perSlice), baseSymbol].filter(Boolean).join(" ");
+  const childLine = preview
+    ? [formatTokenAmount(preview.perSlice), unitSymbol].filter(Boolean).join(" ")
+    : "";
+  const resting = restingOrderText(restingOrderCount(input));
+  const jitter = jitterNote(input);
+  const stopTrigger = state.ri_sl_enabled
+    ? exitTriggerPrice(
+      state.side === 1 ? "BUY" : "SELL",
+      "stop_loss",
+      exitDraft(state, "ri_sl"),
+      reference?.price ?? 0,
+    )
+    : null;
+  const takeNote = upToTakeProfitNote(input);
+  const showCap = state.ri_mode === "UP_TO"
+    || (state.ri_tp_enabled && state.ri_tp_execution === "ICEBERG");
 
   return (
     <div className="space-y-2.5">
@@ -359,8 +405,8 @@ export function RangeIcebergFields({
           Step {formatTokenAmount(orderStep(sizeRule) || sizeRule.minOrderSize)}{baseSymbol ? ` ${baseSymbol}` : ""}. Minimum {formatTokenAmount(sizeRule.minOrderSize)}.
         </p>
       )}
-      {rounded && (
-        <p className="text-[10px] text-[var(--color-text-muted)]">{rounded}</p>
+      {shrunk && (
+        <p className="text-[10px] text-[var(--color-text-muted)]">{shrunk}</p>
       )}
       <SelectField
         label="Size unit"
@@ -407,10 +453,18 @@ export function RangeIcebergFields({
         />
       )}
       <Toggle label="Iceberg" checked={state.ri_iceberg} onChange={(v) => set("ri_iceberg", v)} />
-      <div className="grid grid-cols-2 gap-2">
+      {state.ri_iceberg && (
         <NumberField label="Visible count" value={state.ri_visible_count} field="ri_visible_count" dispatch={dispatch} step={1} min={1} />
-        <NumberField label="Levels" value={state.ri_levels} field="ri_levels" dispatch={dispatch} step={1} min={1} />
-      </div>
+      )}
+      <p className="text-[10px] text-[var(--color-text-muted)]">{resting}</p>
+      <NumberField
+        label={state.ri_mode === "RANGE" ? "Price rungs" : "Levels"}
+        value={state.ri_levels}
+        field="ri_levels"
+        dispatch={dispatch}
+        step={1}
+        min={1}
+      />
       <div className="grid grid-cols-2 gap-2">
         <TextField
           label="Duration"
@@ -419,18 +473,50 @@ export function RangeIcebergFields({
           onChange={(v) => set("ri_duration", v)}
         />
         <TextField
-          label="Schedule interval"
-          value={state.ri_schedule_interval}
-          placeholder="30s"
-          onChange={(v) => set("ri_schedule_interval", v)}
+          label="Expiry, from submit"
+          value={state.ri_expiry}
+          placeholder="30m, 24h, or seconds"
+          onChange={(v) => set("ri_expiry", v)}
         />
       </div>
+      <TextField
+        label="Schedule interval"
+        value={state.ri_schedule_interval}
+        placeholder="30s"
+        onChange={(v) => set("ri_schedule_interval", v)}
+      />
+      {state.ri_duration.trim() && (
+        <>
+          <SelectField
+            label="Schedule start"
+            value={state.ri_schedule_start}
+            field="ri_schedule_start"
+            dispatch={dispatch}
+            options={START_OPTIONS}
+          />
+          <p className="text-[10px] text-[var(--color-text-muted)]">{scheduleStartLine(state.ri_schedule_start)}</p>
+        </>
+      )}
       {scheduleText && (
         <p className="text-[10px] text-[var(--color-text-muted)]">{scheduleText}</p>
       )}
-      <SelectField label="Catch up" value={state.ri_catch_up} field="ri_catch_up" dispatch={dispatch} options={CATCH_UP_OPTIONS} />
-      <SelectField label="Cap behavior" value={state.ri_cap_behavior} field="ri_cap_behavior" dispatch={dispatch} options={CAP_OPTIONS} />
-      <Toggle label="Reduce only" checked={state.ri_reduce_only} onChange={(v) => set("ri_reduce_only", v)} />
+      {state.ri_duration.trim() && (
+        <SelectField label="Catch up" value={state.ri_catch_up} field="ri_catch_up" dispatch={dispatch} options={CATCH_UP_OPTIONS} />
+      )}
+      {showCap && (
+        <SelectField
+          label={state.ri_mode === "RANGE" ? "Take profit cap" : "Cap behavior"}
+          value={state.ri_cap_behavior}
+          field="ri_cap_behavior"
+          dispatch={dispatch}
+          options={CAP_OPTIONS}
+        />
+      )}
+      {hedge ? (
+        <p className="text-[10px] text-[var(--color-text-muted)]">Open adds a position. Close reduces it.</p>
+      ) : (
+        <Toggle label="Reduce only" checked={state.ri_reduce_only} onChange={(v) => set("ri_reduce_only", v)} />
+      )}
       <SectionHeader>Exits</SectionHeader>
       <SelectField
         label="Arm exits"
@@ -440,7 +526,7 @@ export function RangeIcebergFields({
         options={ARM_OPTIONS}
       />
       <p className="text-[10px] text-[var(--color-text-muted)]">
-        After full fill waits for the whole entry. On any fill, a limit take profit rests and grows with fills. A market or iceberg take profit waits for its trigger price.
+        After full fill waits for the whole entry. On any fill, a limit take profit rests and grows with fills. A market or iceberg take profit cancels the remaining entry. Exit orders are not post only.
       </p>
       <ExitEditor
         title="Take profit"
@@ -450,7 +536,11 @@ export function RangeIcebergFields({
         state={state}
         dispatch={dispatch}
         reference={reference}
+        bound={rangeBound(state, "take_profit")}
       />
+      {takeNote && (
+        <p className="text-[10px] text-[var(--color-text-muted)]">{takeNote}</p>
+      )}
       <ExitEditor
         title="Stop loss"
         kind="stop_loss"
@@ -459,14 +549,24 @@ export function RangeIcebergFields({
         state={state}
         dispatch={dispatch}
         reference={reference}
+        bound={rangeBound(state, "stop_loss")}
       />
+      {state.ri_sl_enabled && (
+        <p className="text-[10px] text-[var(--color-text-muted)]">
+          {stopProtectionText(state.side === 1 ? "BUY" : "SELL", stopTrigger)}
+        </p>
+      )}
       {preview && (
         <div className="rounded border border-[var(--color-border)] bg-[var(--color-bg)] px-2.5 py-2 text-[10px] text-[var(--color-text-muted)]">
           <p className="font-medium text-[var(--color-text)]">Preview</p>
           <p>Total {totalLine}</p>
-          <p>Per slice {sliceLine} across {preview.sliceCount}</p>
+          {state.ri_mode === "RANGE" ? (
+            <p>{sent.rungs ?? preview.sliceCount} price rungs</p>
+          ) : (
+            <p>Child size {childLine}{state.ri_mode === "UP_TO" && state.ri_size_unit === "QUOTE" ? " at the limit. A better price buys more base." : ""}</p>
+          )}
           <p>Interval {formatInterval(preview.intervalSeconds)}</p>
-          <p>Max price {preview.maxPrice ?? "not set"}</p>
+          {jitter && <p>{jitter}</p>}
           {sent.error && <p className="text-[var(--color-red)]">{sent.error}</p>}
         </div>
       )}
@@ -482,17 +582,30 @@ export function RangeIcebergFields({
       </button>
       {advanced && (
         <div className="space-y-2.5">
-          <SelectField label="Distribution" value={state.ri_distribution} field="ri_distribution" dispatch={dispatch} options={DISTRIBUTION_OPTIONS} />
-          <NumberField label="Weight" value={state.ri_weight} field="ri_weight" dispatch={dispatch} step={0.1} />
+          {state.ri_mode === "RANGE" && (
+            <>
+              <SelectField label="Distribution" value={state.ri_distribution} field="ri_distribution" dispatch={dispatch} options={DISTRIBUTION_OPTIONS} />
+              <NumberField label="Weight" value={state.ri_weight} field="ri_weight" dispatch={dispatch} step={0.1} />
+              <p className="text-[10px] text-[var(--color-text-muted)]">
+                Positive puts more size at the high end. Negative puts more at the low end. Weighted uses the same prices as Linear.
+              </p>
+            </>
+          )}
           <Toggle label="Post only" checked={state.ri_post_only} onChange={(v) => set("ri_post_only", v)} />
+          <p className="text-[10px] text-[var(--color-text-muted)]">Exit orders are not post only.</p>
           <NumberField label="Slice amount" value={state.ri_slice_amount} field="ri_slice_amount" dispatch={dispatch} step={0.001} min={0} />
-          <NumberField label="Size jitter" value={state.ri_size_jitter_pct} field="ri_size_jitter_pct" dispatch={dispatch} step={0.01} min={0} />
-          <NumberField label="Price jitter" value={state.ri_price_jitter_pct} field="ri_price_jitter_pct" dispatch={dispatch} step={0.01} min={0} />
-          <NumberField label="Timing jitter" value={state.ri_timing_jitter_pct} field="ri_timing_jitter_pct" dispatch={dispatch} step={0.01} min={0} />
+          <NumberField label="Size jitter" value={state.ri_size_jitter_pct} field="ri_size_jitter_pct" dispatch={dispatch} step={0.0001} min={0} isPercent suffix="%" />
+          <NumberField label="Price jitter" value={state.ri_price_jitter_pct} field="ri_price_jitter_pct" dispatch={dispatch} step={0.0001} min={0} isPercent suffix="%" />
+          <NumberField label="Timing jitter" value={state.ri_timing_jitter_pct} field="ri_timing_jitter_pct" dispatch={dispatch} step={0.0001} min={0} isPercent suffix="%" />
           <NumberField label="Min order interval (s)" value={state.ri_min_order_interval} field="ri_min_order_interval" dispatch={dispatch} step={0.1} min={0} />
-          <NumberField label="Expiry (s)" value={state.ri_expiry_seconds} field="ri_expiry_seconds" dispatch={dispatch} step={1} min={0} />
-          <NumberField label="Max slippage" value={state.ri_max_slippage} field="ri_max_slippage" dispatch={dispatch} step={0.001} min={0} />
+          {state.ri_min_order_interval === 0 && (
+            <p className="text-[10px] text-[var(--color-text-muted)]">0 sends orders back to back.</p>
+          )}
+          {state.ri_mode === "RANGE" && (
+            <NumberField label="Max slippage" value={state.ri_max_slippage} field="ri_max_slippage" dispatch={dispatch} step={0.001} min={0} />
+          )}
           <TextField label="Random seed" value={state.ri_random_seed} placeholder="optional" onChange={(v) => set("ri_random_seed", v)} />
+          <p className="text-[10px] text-[var(--color-text-muted)]">Repeats the jitter sequence.</p>
         </div>
       )}
     </div>

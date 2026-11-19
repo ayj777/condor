@@ -65,6 +65,8 @@ export interface OrderState {
   ri_levels: number;
   ri_duration: string;
   ri_schedule_interval: string;
+  /** Submit starts the clock immediately. First fill waits for the first fill. */
+  ri_schedule_start: "SUBMIT" | "FIRST_FILL";
   ri_catch_up: "CARRY" | "SKIP";
   ri_cap_behavior: "REST_AT_CAP" | "WAIT";
   ri_margin_mode: "ISOLATED" | "CROSS";
@@ -79,7 +81,8 @@ export interface OrderState {
   ri_price_jitter_pct: number;
   ri_timing_jitter_pct: number;
   ri_min_order_interval: number;
-  ri_expiry_seconds: number;
+  /** Empty means no expiry. Seconds or `30m`. Measured from submit. */
+  ri_expiry: string;
   ri_max_slippage: number;
   ri_random_seed: string;
   ri_show_advanced: boolean;
@@ -158,11 +161,12 @@ export const ORDER_DEFAULTS: OrderState = {
   ri_price_low: 0,
   ri_price_high: 0,
   ri_limit_price: 0,
-  ri_iceberg: false,
+  ri_iceberg: true,
   ri_visible_count: 1,
   ri_levels: 10,
   ri_duration: "",
   ri_schedule_interval: "",
+  ri_schedule_start: "SUBMIT",
   ri_catch_up: "CARRY",
   ri_cap_behavior: "REST_AT_CAP",
   // Isolated is the mexc_perpetual default, and a flat side sends it.
@@ -178,7 +182,7 @@ export const ORDER_DEFAULTS: OrderState = {
   ri_timing_jitter_pct: 0,
   // 0.6s keeps a child order inside MEXC's 4 requests per 2 seconds.
   ri_min_order_interval: 0.6,
-  ri_expiry_seconds: 0,
+  ri_expiry: "",
   ri_max_slippage: 0,
   ri_random_seed: "",
   ri_show_advanced: false,
@@ -215,13 +219,29 @@ const STORAGE_KEY = ORDER_DEFAULTS_KEY;
 /** Bumped when quote replaced base as the default size unit. */
 export const ORDER_SIZE_UNIT_VERSION = 2;
 
+/**
+ * Bumped when iceberg defaults on and jitter is stored as a fraction shown
+ * as a percent. A saved form from before this version turns iceberg on.
+ * A saved duration with no schedule start keeps First fill, which is what
+ * those orders did. A value above 1 was typed into the old unlabeled jitter
+ * field as a percent, so it is divided by 100 and capped at 100%.
+ */
+export const FORM_DEFAULTS_VERSION = 3;
+
+const JITTER_FIELDS = [
+  "ri_size_jitter_pct",
+  "ri_price_jitter_pct",
+  "ri_timing_jitter_pct",
+] as const satisfies readonly (keyof OrderState)[];
+
 const PERSISTED_FIELDS: (keyof OrderState)[] = [
   "side", "amount", "amount_unit", "execution_strategy", "leverage",
   "chaser_distance", "chaser_refresh_threshold", "position_action",
   "ri_mode", "ri_total_amount", "ri_size_unit", "ri_iceberg", "ri_visible_count",
-  "ri_levels", "ri_duration", "ri_schedule_interval",
+  "ri_levels", "ri_duration", "ri_schedule_interval", "ri_schedule_start",
   "ri_catch_up", "ri_cap_behavior", "ri_margin_mode", "ri_reduce_only",
   "ri_distribution", "ri_weight", "ri_post_only", "ri_min_order_interval",
+  ...JITTER_FIELDS,
 ];
 
 function readSavedBlob(): Record<string, unknown> | null {
@@ -252,6 +272,33 @@ function loadSavedDefaults(): OrderState {
     const derived = intervalFromSavedSlices(saved);
     if (derived) loaded.ri_schedule_interval = derived;
   }
+  return migrateFormDefaults(saved, loaded);
+}
+
+function capSavedJitter(raw: number): number {
+  if (!(raw > 0)) return 0;
+  if (raw <= 1) return raw;
+  const fraction = raw / 100;
+  return fraction > 1 ? 1 : fraction;
+}
+
+function migrateFormDefaults(
+  saved: Record<string, unknown> | null,
+  loaded: OrderState,
+): OrderState {
+  const formVersion = Number(saved?.form_defaults_version ?? 0);
+  if (!(formVersion >= FORM_DEFAULTS_VERSION)) {
+    loaded.ri_iceberg = true;
+    const duration = String(saved?.ri_duration ?? loaded.ri_duration ?? "").trim();
+    if (duration && (saved == null || saved.ri_schedule_start == null)) {
+      loaded.ri_schedule_start = "FIRST_FILL";
+    }
+  }
+  for (const key of JITTER_FIELDS) {
+    if (!saved || !(key in saved)) continue;
+    const raw = Number(saved[key]);
+    if (Number.isFinite(raw)) loaded[key] = capSavedJitter(raw);
+  }
   return loaded;
 }
 
@@ -274,22 +321,29 @@ function dropSavedScheduleSlices(saved: Record<string, unknown>) {
 }
 
 function saveDefaults(state: OrderState) {
-  const toSave: Record<string, unknown> = { size_unit_version: ORDER_SIZE_UNIT_VERSION };
+  const toSave: Record<string, unknown> = {
+    size_unit_version: ORDER_SIZE_UNIT_VERSION,
+    form_defaults_version: FORM_DEFAULTS_VERSION,
+  };
   for (const key of PERSISTED_FIELDS) toSave[key] = state[key];
   localStorage.setItem(STORAGE_KEY, JSON.stringify(toSave));
 }
 
-/** Remember an explicit base or quote choice without rewriting the rest of the form. */
-function persistSizeUnits(sizeUnit: OrderState["ri_size_unit"], amountUnit: OrderState["amount_unit"]) {
+/** Remember size units and the migrated defaults without rewriting prices. */
+function persistFormMemory(state: OrderState) {
   const saved = readSavedBlob() ?? {};
   saved.size_unit_version = ORDER_SIZE_UNIT_VERSION;
-  saved.ri_size_unit = sizeUnit;
-  saved.amount_unit = amountUnit;
+  saved.form_defaults_version = FORM_DEFAULTS_VERSION;
+  saved.ri_size_unit = state.ri_size_unit;
+  saved.amount_unit = state.amount_unit;
+  saved.ri_iceberg = state.ri_iceberg;
+  saved.ri_schedule_start = state.ri_schedule_start;
+  for (const key of JITTER_FIELDS) saved[key] = state[key];
   dropSavedScheduleSlices(saved);
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(saved));
   } catch {
-    // A remembered unit is a convenience. A denied store does not block the form.
+    // A remembered default is a convenience. A denied store does not block the form.
   }
 }
 
@@ -312,6 +366,15 @@ export function orderReducer(state: OrderState, action: OrderAction): OrderState
       if (action.field === "leverage") {
         // Typing updates the draft only. Apply sends it, and only after this.
         return { ...state, leverage: Number(action.value), leverageExplicit: false, leverageTouched: true };
+      }
+      if (
+        action.field === "ri_size_jitter_pct"
+        || action.field === "ri_price_jitter_pct"
+        || action.field === "ri_timing_jitter_pct"
+      ) {
+        const raw = Number(action.value);
+        const capped = !Number.isFinite(raw) || raw < 0 ? 0 : raw > 1 ? 1 : raw;
+        return { ...state, [action.field]: capped };
       }
       if (action.field === "ri_margin_mode") {
         return {
@@ -445,6 +508,7 @@ export function rangeIcebergInput(state: OrderState): RangeIcebergInput {
     levels: state.ri_levels,
     duration: state.ri_duration,
     scheduleInterval: state.ri_schedule_interval,
+    scheduleStart: state.ri_schedule_start,
     catchUp: state.ri_catch_up,
     capBehavior: state.ri_cap_behavior,
     leverage: state.leverage,
@@ -458,7 +522,8 @@ export function rangeIcebergInput(state: OrderState): RangeIcebergInput {
     priceJitterPct: state.ri_price_jitter_pct,
     timingJitterPct: state.ri_timing_jitter_pct,
     minOrderInterval: state.ri_min_order_interval,
-    expirySeconds: state.ri_expiry_seconds,
+    expiry: state.ri_expiry,
+    expirySeconds: parseDuration(state.ri_expiry) ?? 0,
     maxSlippage: state.ri_max_slippage,
     randomSeed: state.ri_random_seed,
     exitArming: state.ri_exit_arming,
@@ -518,6 +583,7 @@ export function useOrderValidation(
       );
       if (sent.error) return { valid: false, errors: [sent.error] };
       input.totalAmount = sent.total;
+      input.sizeUnit = sent.sizeUnit;
       if (state.position_action === "CLOSE") input.reduceOnly = true;
       const message = validateRangeIceberg(input);
       return { valid: message == null, errors: message ? [message] : [] };
@@ -571,8 +637,16 @@ export function useOrderConfig(
   }, [priceIncrement, priceStamp]);
   const validation = useOrderValidation(state, sizeRule, baseSymbol, quoteSymbol, midPrice);
   useEffect(() => {
-    persistSizeUnits(state.ri_size_unit, state.amount_unit);
-  }, [state.ri_size_unit, state.amount_unit]);
+    persistFormMemory(state);
+  }, [
+    state.ri_size_unit,
+    state.amount_unit,
+    state.ri_iceberg,
+    state.ri_schedule_start,
+    state.ri_size_jitter_pct,
+    state.ri_price_jitter_pct,
+    state.ri_timing_jitter_pct,
+  ]);
 
   const chartProps: ChartPriceMapping = useMemo(() => {
     if (isRangeIceberg(state.execution_strategy)) {
@@ -635,6 +709,17 @@ export function useOrderConfig(
         "#ef4444",
         "ri_sl_price",
       );
+      if (!upTo && state.ri_sl_enabled && state.ri_sl_trigger === "price") {
+        const bound = state.side === 1 ? state.ri_price_low : state.ri_price_high;
+        if (bound > 0) {
+          extraLines.push({
+            price: bound,
+            label: "Stop bound",
+            color: "#f97316",
+            lineStyle: "dotted",
+          });
+        }
+      }
       const lineLabels: NonNullable<ChartPriceMapping["lineLabels"]> = upTo
         ? { start: "Limit" }
         : { start: "Low", end: "High" };
@@ -707,6 +792,7 @@ export function useOrderConfig(
       if (input.takeProfit) input.takeProfit = quantizeExit(input.takeProfit, tick);
       if (input.stopLoss) input.stopLoss = quantizeExit(input.stopLoss, tick);
       if (state.position_action === "CLOSE") input.reduceOnly = true;
+      const typedSlice = input.sliceAmount;
       const sent = icebergSentSize(
         input,
         sizeRule,
@@ -716,8 +802,8 @@ export function useOrderConfig(
       );
       if (!sent.error) {
         input.totalAmount = sent.total;
-        input.sliceAmount = sent.perSlice;
-        if (sent.sizeUnit) input.sizeUnit = sent.sizeUnit;
+        input.sizeUnit = sent.sizeUnit;
+        input.sliceAmount = typedSlice > 0 ? typedSlice : 0;
       }
       const margin = marginForOpen({
         isSpot,

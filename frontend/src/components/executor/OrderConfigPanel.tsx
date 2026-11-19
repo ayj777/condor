@@ -302,9 +302,13 @@ export function OrderConfigPanel({
         {!isSpot && (
           <div className="flex items-center justify-between gap-2">
             <p className="text-[10px] text-[var(--color-text-muted)]">
-              {positionLeverage != null && positionLeverage >= 1
-                ? `Orders keep the open ${positionLeverage}x. Apply leverage to change it.`
-                : "Apply leverage to set it. Placing an order does not."}
+              {isRange
+                ? positionLeverage != null && positionLeverage >= 1
+                  ? `This iceberg uses the open ${positionLeverage}x. Apply leverage to change it before you create.`
+                  : `No open position on this side. This iceberg sets leverage to ${state.leverage}x.`
+                : positionLeverage != null && positionLeverage >= 1
+                  ? `Orders keep the open ${positionLeverage}x. Apply leverage to change it.`
+                  : "Apply leverage to set it. Placing an order does not."}
             </p>
             <button
               type="button"
@@ -357,6 +361,7 @@ export function OrderConfigPanel({
           baseSymbol={displayBase}
           quoteSymbol={displayQuote}
           maxBase={orderCap(positionMode, books, openBook ?? null, state.position_action, state.side)}
+          hedge={isHedge(positionMode)}
         />
       )}
 

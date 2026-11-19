@@ -184,6 +184,53 @@ describe("range iceberg edit dialog", () => {
     expect(submitted).toEqual([{ total_amount: 150 }]);
   });
 
+  it("shows frozen settings and blocks a total below the live slice", () => {
+    const submitted: Record<string, unknown>[] = [];
+    render(
+      <RangeIcebergEditDialog
+        executor={executor({
+          config: {
+            mode: "RANGE",
+            total_amount: 100,
+            size_unit: "QUOTE",
+            price_low: 0.07,
+            price_high: 0.09,
+            duration: "10m",
+            schedule_interval: "2m",
+            schedule_start: "SUBMIT",
+            levels: 4,
+            iceberg: true,
+            visible_count: 2,
+            slice_amount: 30,
+            leverage: 20,
+            margin_mode: "ISOLATED",
+          },
+        })}
+        pending={false}
+        error={null}
+        onClose={() => {}}
+        onSubmit={(body) => submitted.push(body)}
+      />,
+    );
+    const text = container.textContent ?? "";
+    expect(text).toContain("Schedule 10m every 2m, clock starts at submit");
+    expect(text).toContain("4 price rungs");
+    expect(text).toContain("Iceberg on, 2 visible");
+    expect(text).toContain("Slice amount 30 USDT");
+    expect(text).toContain("Leverage 20x");
+    expect(text).toContain("Margin ISOLATED");
+    setInput("Total amount", "20");
+    click("Save");
+    expect(text && container.textContent).toContain("cannot be below the live slice amount");
+    expect(submitted).toEqual([]);
+    setInput("Total amount", "80");
+    click("Save");
+    expect(submitted).toEqual([{ total_amount: 80 }]);
+    expect(submitted[0]).not.toHaveProperty("leverage");
+    expect(submitted[0]).not.toHaveProperty("duration");
+    expect(submitted[0]).not.toHaveProperty("slice_amount");
+  });
+
   it("shows the 409 reason in the error toast, with long instead of buy", () => {
     render(
       <RangeIcebergEditDialog

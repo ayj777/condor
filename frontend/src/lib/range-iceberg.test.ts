@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   exitPreviewText,
   exitTriggerPrice,
+  icebergSentSize,
   intervalFromSliceCount,
   parseDuration,
   rangeIcebergConfig,
@@ -29,6 +30,7 @@ function input(over: Partial<RangeIcebergInput> = {}): RangeIcebergInput {
     levels: 10,
     duration: "10m",
     scheduleInterval: "2m",
+    scheduleStart: "SUBMIT",
     catchUp: "CARRY",
     capBehavior: "REST_AT_CAP",
     leverage: 2,
@@ -42,6 +44,7 @@ function input(over: Partial<RangeIcebergInput> = {}): RangeIcebergInput {
     priceJitterPct: 0,
     timingJitterPct: 0,
     minOrderInterval: 0.6,
+    expiry: "",
     expirySeconds: 0,
     maxSlippage: 0,
     randomSeed: "",
@@ -80,10 +83,11 @@ describe("range iceberg", () => {
     const preview = rangeIcebergPreview(input());
     expect(preview).toMatchObject({
       total: 100,
-      perSlice: 20,
+      perSlice: 10,
       intervalSeconds: 120,
       maxPrice: 0.09,
-      sliceCount: 5,
+      sliceCount: 10,
+      releaseCount: 5,
     });
   });
 
@@ -92,6 +96,7 @@ describe("range iceberg", () => {
     expect(preview?.perSlice).toBe(10);
     expect(preview?.intervalSeconds).toBeNull();
     expect(preview?.sliceCount).toBe(10);
+    expect(preview?.releaseCount).toBeNull();
   });
 
   it("requires a limit price in up-to mode and rejects an inverted range", () => {
@@ -448,7 +453,9 @@ describe("range iceberg", () => {
     const config = rangeIcebergConfig(input(), "mexc_perpetual", "AIOT-USDT");
     expect(config.duration).toBe("10m");
     expect(config.schedule_interval).toBe("2m");
+    expect(config.schedule_start).toBe("SUBMIT");
     expect(config).not.toHaveProperty("schedule_slices");
+    expect(config).not.toHaveProperty("slice_amount");
   });
 
   it("counts slices with the executor formula, including a short last part", () => {
@@ -474,7 +481,7 @@ describe("range iceberg", () => {
       price: 0.08,
       catchUp: "CARRY",
     })).toBe(
-      "6 slices, about 50 USDT (\u2248 625 AIOT) every 10m. Unfilled size carries into the next interval.",
+      "6 slices, about 50 USDT (\u2248 625 AIOT) every 10m. While the market is outside the range, a missed slice is placed later. An order already on the book is left to fill.",
     );
     expect(scheduleNote({
       duration: "25m",
@@ -486,7 +493,7 @@ describe("range iceberg", () => {
       price: 0.08,
       catchUp: "SKIP",
     })).toBe(
-      "2 slices, about 50 AIOT (\u2248 4 USDT) every 10m. The last part of the duration gets no new slice. Unfilled size is left behind. The next interval releases only its own share.",
+      "2 slices, about 50 AIOT (\u2248 4 USDT) every 10m. The last part of the duration gets no new slice. While the market is outside the range, a missed slice is dropped. An order already on the book is left to fill.",
     );
   });
 
@@ -521,5 +528,117 @@ describe("range iceberg", () => {
     expect(validateRangeIceberg(input({ duration: "10m", scheduleInterval: "1h" }))).toBe(
       "Schedule interval cannot be longer than the duration",
     );
+  });
+
+  it("sends a quote range as quote and previews each rung", () => {
+    const sized = input({
+      sizeUnit: "QUOTE",
+      totalAmount: 100,
+      levels: 2,
+      duration: "",
+      scheduleInterval: "",
+    });
+    const sent = icebergSentSize(sized, null, 0.09, false);
+    expect(sent.error).toBeNull();
+    expect(sent.sizeUnit).toBe("QUOTE");
+    expect(sent.total).toBe(100);
+    expect(sent.baseTotal).toBeCloseTo(50 / 0.07 + 50 / 0.09, 4);
+    expect(sent.baseTotal).toBeGreaterThan(100 / 0.09);
+    const config = rangeIcebergConfig(
+      { ...sized, totalAmount: sent.total, sizeUnit: sent.sizeUnit },
+      "mexc_perpetual",
+      "AIOT-USDT",
+    );
+    expect(config.size_unit).toBe("QUOTE");
+    expect(config.total_amount).toBe(100);
+    expect(config).not.toHaveProperty("slice_amount");
+    expect(config).not.toHaveProperty("schedule_start");
+    const perRung = sent.baseTotal / 5;
+    const noted = scheduleNote({
+      duration: "10m",
+      interval: "2m",
+      total: 100,
+      unit: "QUOTE",
+      baseSymbol: "AIOT",
+      quoteSymbol: "USDT",
+      price: 0.09,
+      baseTotal: sent.baseTotal,
+      catchUp: "CARRY",
+    });
+    expect(perRung).toBeGreaterThan(100 / 0.09 / 5);
+    expect(noted).toContain("about 20 USDT");
+    expect(noted).toContain("AIOT");
+    expect(noted).not.toContain("222");
+  });
+
+  it("sends an up-to quote order as quote, estimated at the limit", () => {
+    const sent = icebergSentSize(input({
+      mode: "UP_TO",
+      sizeUnit: "QUOTE",
+      totalAmount: 80,
+      limitPrice: 0.08,
+      duration: "",
+      scheduleInterval: "",
+    }), null, 0.08, false);
+    expect(sent.sizeUnit).toBe("QUOTE");
+    expect(sent.total).toBe(80);
+    expect(sent.baseTotal).toBeCloseTo(1000, 6);
+    const capped = icebergSentSize(input({
+      mode: "UP_TO",
+      sizeUnit: "QUOTE",
+      totalAmount: 80,
+      limitPrice: 0.08,
+      duration: "",
+      scheduleInterval: "",
+    }), null, 0.08, false, 500);
+    expect(capped.total).toBeCloseTo(40, 6);
+    expect(capped.sizeUnit).toBe("QUOTE");
+  });
+
+  it("sends a slice amount only when the trader set one", () => {
+    const config = rangeIcebergConfig(
+      input({ sliceAmount: 12, duration: "", scheduleInterval: "" }),
+      "mexc_perpetual",
+      "AIOT-USDT",
+    );
+    expect(config.slice_amount).toBe(12);
+  });
+
+  it("parses a friendly expiry and sends seconds", () => {
+    const config = rangeIcebergConfig(
+      input({ expiry: "30m", duration: "", scheduleInterval: "" }),
+      "mexc_perpetual",
+      "AIOT-USDT",
+    );
+    expect(config.expiry_seconds).toBe(1800);
+    expect(validateRangeIceberg(input({ expiry: "soon" }))).toMatch(/Expiry/);
+  });
+
+  it("rejects a stop or take profit on the wrong side of the range", () => {
+    expect(validateRangeIceberg(input({
+      stopLoss: exit({ trigger: "price", price: 0.075, percent: 0 }),
+    }))).toMatch(/below price low/);
+    expect(validateRangeIceberg(input({
+      stopLoss: exit({ trigger: "price", price: 0.06, percent: 0 }),
+    }))).toBeNull();
+    expect(validateRangeIceberg(input({
+      side: "SELL",
+      stopLoss: exit({ trigger: "price", price: 0.085, percent: 0 }),
+    }))).toMatch(/above price high/);
+    expect(validateRangeIceberg(input({
+      takeProfit: exit({ trigger: "price", price: 0.09, percent: 0 }),
+    }))).toMatch(/above price high/);
+    expect(validateRangeIceberg(input({
+      takeProfit: exit({ trigger: "price", price: 0.1, percent: 0 }),
+    }))).toBeNull();
+    expect(validateRangeIceberg(input({
+      takeProfit: exit({ trigger: "percent", percent: 0.02 }),
+    }))).toBeNull();
+  });
+
+  it("caps size and price jitter at 100 percent", () => {
+    expect(validateRangeIceberg(input({ sizeJitterPct: 1.5 }))).toMatch(/Size jitter/);
+    expect(validateRangeIceberg(input({ priceJitterPct: 1.5 }))).toMatch(/Price jitter/);
+    expect(validateRangeIceberg(input({ sizeJitterPct: 0.05 }))).toBeNull();
   });
 });
