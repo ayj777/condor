@@ -90,6 +90,30 @@ describe("same stop price", () => {
     );
     expect(warning).toContain("0.07");
     expect(warning).toContain("same stop price");
+    expect(warning).toContain("409");
+    expect(warning).toContain("Create stays off");
+  });
+
+  it("warns when the open tier stores the same stop as a percent off the limit", () => {
+    const draft = input({
+      mode: "UP_TO",
+      limitPrice: 0.08,
+      stopLoss: exit({ trigger: "percent", price: 0, percent: 0.01 }),
+    });
+    const warning = sameStopPriceWarning(draft, "AIOT-USDT", [{
+      type: "range_iceberg_executor",
+      side: "BUY",
+      status: "running",
+      trading_pair: "AIOT-USDT",
+      config: {
+        mode: "UP_TO",
+        limit_price: 0.08,
+        stop_loss: { percent: "0.01", execution: "SINGLE" },
+      },
+      custom_info: {},
+    }]);
+    expect(warning).toContain("409");
+    expect(warning).toContain("Create stays off");
   });
 
   it("stays quiet for a different price, side, pair, or a stopped iceberg", () => {

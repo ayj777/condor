@@ -203,7 +203,7 @@ describe("range iceberg exits", () => {
     render(
       { ri_sl_enabled: true, ri_sl_trigger: "price", ri_sl_price: 0.07 },
       false,
-      "Another open iceberg on this side already uses stop 0.07. The trading API refuses two tiers with the same stop price.",
+      "Another open iceberg on this side already uses stop 0.07. Create stays off. The trading API returns 409 and refuses two tiers with the same stop price.",
     );
     expect(container.textContent).toContain("same stop price");
     expect(container.textContent).toContain("Stop loss");

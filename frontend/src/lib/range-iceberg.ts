@@ -319,21 +319,50 @@ export function configuredStopPrice(input: RangeIcebergInput): number | null {
   return exitTriggerPrice(input.side, "stop_loss", exit, reference.price);
 }
 
+function storedMode(source: OpenIcebergStop): string {
+  const info = source.custom_info ?? {};
+  const cfg = source.config ?? {};
+  const raw = info.mode ?? cfg.mode ?? "RANGE";
+  return String(raw).trim().replace(/[\s-]+/g, "_").toUpperCase();
+}
+
+function storedReference(source: OpenIcebergStop): number | null {
+  const info = source.custom_info ?? {};
+  const cfg = source.config ?? {};
+  if (storedMode(source) === "UP_TO") return finitePrice(cfg.limit_price ?? info.limit_price);
+  const low = finitePrice(cfg.price_low ?? info.price_low);
+  const high = finitePrice(cfg.price_high ?? info.price_high);
+  if (low != null && high != null && low <= high) return (low + high) / 2;
+  return null;
+}
+
+function tradeSide(raw: unknown): "BUY" | "SELL" | null {
+  const text = String(raw ?? "").replace(/^.*\./, "").trim().toUpperCase();
+  if (text === "BUY" || text === "SELL") return text;
+  return null;
+}
+
 function storedStopPrice(source: OpenIcebergStop): number | null {
   const info = source.custom_info ?? {};
   const cfg = source.config ?? {};
   const live = finitePrice(info.stop_loss_trigger_price);
   if (live != null) return live;
   const stop = cfg.stop_loss ?? info.stop_loss;
-  if (stop && typeof stop === "object" && !Array.isArray(stop)) {
-    return finitePrice((stop as Record<string, unknown>).price);
-  }
-  return null;
+  if (!stop || typeof stop !== "object" || Array.isArray(stop)) return null;
+  const row = stop as Record<string, unknown>;
+  const price = finitePrice(row.price);
+  if (price != null) return price;
+  const percent = finitePrice(row.percent);
+  if (percent == null || percent >= 1) return null;
+  const side = tradeSide(source.side || cfg.side || info.side);
+  const reference = storedReference(source);
+  if (!side || reference == null) return null;
+  return exitTriggerPrice(side, "stop_loss", { trigger: "percent", percent, price: 0 }, reference);
 }
 
 /**
- * A warning when another running iceberg on this pair and side already
- * uses this stop price. Submit stays available. The trading API is what refuses it.
+ * Set when another running iceberg on this pair and side already uses this
+ * stop price. Create stays off. The trading API returns 409 for that duplicate.
  */
 export function sameStopPriceWarning(
   input: RangeIcebergInput,
@@ -354,7 +383,7 @@ export function sameStopPriceWarning(
     return theirs != null && samePrice(mine, theirs);
   });
   if (!clash) return null;
-  return `Another open iceberg on this side already uses stop ${formatTriggerPrice(mine)}. The trading API refuses two tiers with the same stop price.`;
+  return `Another open iceberg on this side already uses stop ${formatTriggerPrice(mine)}. Create stays off. The trading API returns 409 and refuses two tiers with the same stop price.`;
 }
 
 export function formatTriggerPrice(price: number): string {

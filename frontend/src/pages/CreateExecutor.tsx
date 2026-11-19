@@ -779,10 +779,16 @@ export function CreateExecutor() {
     },
   });
 
+  const icebergStopWarning =
+    executorType === "iceberg" || orderConfig.state.execution_strategy === "RANGE_ICEBERG"
+      ? sameStopPriceWarning(rangeIcebergInput(orderConfig.state), pair, mainExecutors) ?? ""
+      : "";
+
   // Create mutation
   const createMutation = useMutation({
     mutationFn: () => {
       if (!server) throw new Error("No server");
+      if (icebergStopWarning) throw new Error(icebergStopWarning);
       // Belt to the overlay's braces: the footer is covered on a view-only
       // venue, so this is unreachable from the UI — but the panel should not be
       // one stray caller away from posting a create it knows the venue will
@@ -923,10 +929,6 @@ export function CreateExecutor() {
     ),
   });
   const marginBlocked = "block" in marginDecision;
-  const icebergStopWarning =
-    executorType === "iceberg" || orderConfig.state.execution_strategy === "RANGE_ICEBERG"
-      ? sameStopPriceWarning(rangeIcebergInput(orderConfig.state), pair, mainExecutors) ?? ""
-      : "";
 
   if (!server) {
     return <NoServerCard message="Select a server from the sidebar to create an executor." />;
@@ -1236,6 +1238,9 @@ export function CreateExecutor() {
                   {marginBlocked && (
                     <p className="mb-2 text-[11px] text-[var(--color-red)]">{MARGIN_CHOOSE}</p>
                   )}
+                  {icebergStopWarning && (
+                    <p className="mb-2 text-[11px] text-[var(--color-red)]">{icebergStopWarning}</p>
+                  )}
                   <button
                     onClick={() => {
                       if (!claimInflight(createLock)) return;
@@ -1245,7 +1250,7 @@ export function CreateExecutor() {
                         },
                       });
                     }}
-                    disabled={!caps.canTrade || !activeValidation.valid || createMutation.isPending || ordersBlockCreate(executorType, caps.hasOrderBook, ordersHealth.isError) || strategyHold || icebergHeld || modeUnread || marginBlocked || (executorType === "order" && !orderStrategies.includes(orderConfig.state.execution_strategy))}
+                    disabled={!caps.canTrade || !activeValidation.valid || createMutation.isPending || ordersBlockCreate(executorType, caps.hasOrderBook, ordersHealth.isError) || strategyHold || icebergHeld || modeUnread || marginBlocked || Boolean(icebergStopWarning) || (executorType === "order" && !orderStrategies.includes(orderConfig.state.execution_strategy))}
                     className="flex w-full items-center justify-center gap-2 rounded-lg bg-[var(--color-primary)] px-4 py-2.5 text-sm font-bold text-white transition-colors hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     {createMutation.isPending ? (
