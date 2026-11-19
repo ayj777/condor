@@ -10,6 +10,7 @@ import {
   rangeIcebergConfig,
   rangeIcebergPreview,
   scheduleHasRemainder,
+  mergeById,
   sameStopPriceWarning,
   scheduleNote,
   scheduleSliceCount,
@@ -92,6 +93,35 @@ describe("same stop price", () => {
     expect(warning).toContain("same stop price");
     expect(warning).toContain("409");
     expect(warning).toContain("Create stays off");
+  });
+
+  it("includes an iceberg from another controller in the stop check", () => {
+    const visible = [{
+      id: "ri-main",
+      type: "range_iceberg_executor",
+      side: "BUY",
+      status: "running",
+      trading_pair: "AIOT-USDT",
+      config: { stop_loss: { price: "0.05" } },
+      custom_info: {},
+    }];
+    const fetched = [{
+      id: "ri-other",
+      type: "range_iceberg_executor",
+      side: "BUY",
+      status: "running",
+      trading_pair: "AIOT-USDT",
+      config: { stop_loss: { price: "0.07" } },
+      custom_info: {},
+    }];
+    const rows = mergeById([visible, fetched]);
+    expect(rows.map((row) => row.id)).toEqual(["ri-main", "ri-other"]);
+    const warning = sameStopPriceWarning(
+      input({ mode: "UP_TO", limitPrice: 0.1, stopLoss: exit({ trigger: "price", price: 0.07 }) }),
+      "AIOT-USDT",
+      rows,
+    );
+    expect(warning).toContain("409");
   });
 
   it("warns when the open tier stores the same stop as a percent off the limit", () => {

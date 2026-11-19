@@ -289,6 +289,17 @@ export function exitTriggerPrice(
   return reference * (above ? 1 + exit.percent : 1 - exit.percent);
 }
 
+/** Rows from the visible list and a wider fetch, with the later copy winning. */
+export function mergeById<T extends { id?: string }>(groups: T[][]): T[] {
+  const map = new Map<string, T>();
+  for (const group of groups) {
+    for (const row of group) {
+      if (row.id) map.set(row.id, row);
+    }
+  }
+  return [...map.values()];
+}
+
 export interface OpenIcebergStop {
   type?: string;
   side?: string;

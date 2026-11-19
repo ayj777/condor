@@ -48,7 +48,7 @@ import { useLastClose } from "@/hooks/useCandleStore";
 import { usePairBalances } from "@/hooks/usePairBalances";
 import { useServer } from "@/hooks/useServer";
 import { useCondorWebSocket } from "@/hooks/useWebSocket";
-import { useMainControllerData } from "@/hooks/useMainControllerData";
+import { useMainControllerData, usePairExecutors } from "@/hooks/useMainControllerData";
 import { useResizeDrag } from "@/hooks/useResizeDrag";
 import { api } from "@/lib/api";
 import { candleStore } from "@/lib/candle-store";
@@ -65,7 +65,7 @@ import {
 } from "@/lib/gridExecutor";
 import { formatConnectorName, formatPriceSig } from "@/lib/formatters";
 import { baseAmountError, legalBaseAmount, plainOrderPrice, plainOrderSentSize, plainOrderSummary } from "@/lib/order-size";
-import { icebergSentSize, oneAtATimeText, sameStopPriceWarning, scheduleNote } from "@/lib/range-iceberg";
+import { icebergSentSize, mergeById, oneAtATimeText, sameStopPriceWarning, scheduleNote } from "@/lib/range-iceberg";
 import { applyHedge, applyReducing, bookForOrder, canonicalPositionMode, claimInflight, ICEBERG_MARGIN_HOLD, icebergCreateHeld, isHedge, marginForOpen, MARGIN_CHOOSE, orderCap, ordersBlockCreate, positionModeBlocksCreate, sideHasOpenPosition, type HedgeBooks, type OpenBook } from "@/lib/trade-guards";
 import { useViewFacts } from "@/lib/viewFacts";
 
@@ -256,6 +256,7 @@ export function CreateExecutor() {
   // Main controller data (executors + positions filtered by connector/pair)
   const { executors: mainExecutors, overlays: mainOverlays, positions: mainPositions, isLoadingPositions, isPositionsError } =
     useMainControllerData(server, connector, pair);
+  const pairExecutors = usePairExecutors(server, pair);
 
   // Current price. /market/prices only answers for a Hummingbot connector, so a
   // venue without that trait reads the last close off the candle stream instead. The store is
@@ -781,7 +782,7 @@ export function CreateExecutor() {
 
   const icebergStopWarning =
     executorType === "iceberg" || orderConfig.state.execution_strategy === "RANGE_ICEBERG"
-      ? sameStopPriceWarning(rangeIcebergInput(orderConfig.state), pair, mainExecutors) ?? ""
+      ? sameStopPriceWarning(rangeIcebergInput(orderConfig.state), pair, mergeById([mainExecutors, pairExecutors])) ?? ""
       : "";
 
   // Create mutation

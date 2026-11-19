@@ -4,6 +4,7 @@ import { ChevronUp, ChevronDown, Loader2, Play, Square, Trash2, Wallet, Clock, A
 
 import { api, type ExecutorInfo, type ConsolidatedPosition } from "@/lib/api";
 import { apiErrorMessage, editAcceptedMessage } from "@/lib/api-error";
+import { usePairExecutors } from "@/hooks/useMainControllerData";
 import { useServer } from "@/hooks/useServer";
 import { usePairBalances } from "@/hooks/usePairBalances";
 import { useRates } from "@/hooks/useRates";
@@ -18,6 +19,7 @@ import {
 import { childOrderIds, entryPause, executorBaseSizeNote, executorRunDetail, executorTypeLabel, rangeIcebergTierLine } from "@/lib/executor-run";
 import { ExecutorHoverRow } from "@/components/trade/ExecutorDetailPopup";
 import { stopKeepCopy } from "@/lib/executorStopCopy";
+import { mergeById } from "@/lib/range-iceberg";
 import { rangeIcebergEditable } from "@/lib/range-iceberg-edit";
 import { RangeIcebergEditDialog } from "@/components/trade/RangeIcebergEditDialog";
 import { SuccessToast } from "@/components/executor/ExecutorSuccessModal";
@@ -137,6 +139,8 @@ export function TradeBottomPane({
   markPrice = null,
 }: TradeBottomPaneProps) {
   const { server } = useServer();
+  const pairExecutors = usePairExecutors(server, pair);
+  const stopPeers = mergeById([executors, pairExecutors]);
   const queryClient = useQueryClient();
   const containerRef = useRef<HTMLDivElement>(null);
   const [expanded, setExpanded] = useState(() => {
@@ -804,7 +808,7 @@ export function TradeBottomPane({
           key={editTarget.id}
           executor={editTarget}
           markPrice={markPrice}
-          peers={executors.filter((ex) => ex.id !== editTarget.id)}
+          peers={stopPeers.filter((ex) => ex.id !== editTarget.id)}
           pending={editMutation.isPending}
           error={editError}
           onClose={() => {
