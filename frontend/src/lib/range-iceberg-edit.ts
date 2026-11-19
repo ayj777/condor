@@ -217,7 +217,9 @@ export function rangeIcebergEditable(source: RangeIcebergEditSource): boolean {
   if (status !== "RUNNING" && status !== "ACTIVE") return false;
   if (TERMINATING.has(status)) return false;
   const close = token(source.close_type || source.custom_info?.close_type);
-  if (close === "POSITION_HOLD") return false;
+  if (close === "POSITION_HOLD" || close === "POSITION_CLOSED_EXTERNALLY") return false;
+  const external = source.custom_info?.external_close;
+  if (external === true || external === "true" || external === 1 || external === "1") return false;
   const exitState = token(
     source.custom_info?.exit_state
       ?? (source as { exit_state?: unknown }).exit_state,

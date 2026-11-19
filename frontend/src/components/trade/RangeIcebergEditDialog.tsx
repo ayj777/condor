@@ -2,11 +2,10 @@ import { useReducer, useState } from "react";
 
 import { ExitEditor, rangeBound } from "@/components/executor/RangeIcebergFields";
 import { NumberField, PriceField } from "@/components/executor/fields";
-import { orderReducer } from "@/components/executor/order-config";
+import { orderReducer, rangeIcebergInput } from "@/components/executor/order-config";
 import { ErrorToast } from "@/components/executor/ExecutorSuccessModal";
-import { positionSideNotice } from "@/lib/api-error";
 import type { ExecutorInfo } from "@/lib/api";
-import { exitReference } from "@/lib/range-iceberg";
+import { exitReference, sameStopPriceWarning, type OpenIcebergStop } from "@/lib/range-iceberg";
 import { approximateQuoteLabel, pairTokens, referenceSizePrice } from "@/lib/order-size";
 import {
   draftFromOrderState,
@@ -32,6 +31,7 @@ export function RangeIcebergEditDialog({
   pending,
   error,
   markPrice = null,
+  peers = [],
   onClose,
   onSubmit,
 }: {
@@ -40,6 +40,8 @@ export function RangeIcebergEditDialog({
   error: string | null;
   /** Mid or last price, used when the executor has no average fill. */
   markPrice?: number | null;
+  /** Other open icebergs. This row is already left out. */
+  peers?: OpenIcebergStop[];
   onClose: () => void;
   onSubmit: (body: Record<string, unknown>) => void;
 }) {
@@ -66,6 +68,11 @@ export function RangeIcebergEditDialog({
   const [state, dispatch] = useReducer(orderReducer, before, orderStateForEdit);
   const [localError, setLocalError] = useState<string | null>(null);
   const draft = draftFromOrderState(state);
+  const stopWarning = sameStopPriceWarning(
+    rangeIcebergInput(state),
+    executor.trading_pair,
+    peers,
+  ) ?? "";
   const reference = exitReference({
     mode: draft.mode,
     limitPrice: draft.limitPrice,
@@ -76,6 +83,10 @@ export function RangeIcebergEditDialog({
   const kind = draft.mode === "UP_TO" ? "limit iceberg" : "range iceberg";
 
   function save() {
+    if (stopWarning) {
+      setLocalError(stopWarning);
+      return;
+    }
     const problem = validateRangeIcebergEdit(draft, filled, sliceAmount);
     if (problem) {
       setLocalError(problem);
@@ -163,10 +174,13 @@ export function RangeIcebergEditDialog({
             bound={rangeBound(state, "stop_loss")}
           />
         </div>
+        {stopWarning && (
+          <p className="mt-2 text-[11px] text-[var(--color-red)]">{stopWarning}</p>
+        )}
         {localError && (
           <p className="mt-2 text-[11px] text-[var(--color-red)]">{localError}</p>
         )}
-        {error && <ErrorToast message={positionSideNotice(error)} />}
+        {error && <ErrorToast message={error} />}
         <div className="mt-3 flex justify-end gap-2">
           <button
             type="button"
@@ -178,7 +192,7 @@ export function RangeIcebergEditDialog({
           <button
             type="button"
             onClick={save}
-            disabled={pending}
+            disabled={pending || Boolean(stopWarning)}
             className="rounded bg-[var(--color-primary)] px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50"
           >
             {pending ? "Saving" : "Save"}

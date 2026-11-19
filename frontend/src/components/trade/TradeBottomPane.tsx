@@ -4,6 +4,7 @@ import { ChevronUp, ChevronDown, Loader2, Play, Square, Trash2, Wallet, Clock, A
 
 import { api, type ExecutorInfo, type ConsolidatedPosition } from "@/lib/api";
 import { apiErrorMessage, editAcceptedMessage } from "@/lib/api-error";
+import { usePairExecutors } from "@/hooks/useMainControllerData";
 import { useServer } from "@/hooks/useServer";
 import { usePairBalances } from "@/hooks/usePairBalances";
 import { useRates } from "@/hooks/useRates";
@@ -15,9 +16,10 @@ import {
   pnlTextClass,
   isExecutorActive,
 } from "@/lib/formatters";
-import { childOrderIds, executorBaseSizeNote, executorRunDetail, executorTypeLabel } from "@/lib/executor-run";
+import { childOrderIds, entryPause, executorBaseSizeNote, executorRunDetail, executorTypeLabel, icebergHasExits, rangeIcebergTierLine } from "@/lib/executor-run";
 import { ExecutorHoverRow } from "@/components/trade/ExecutorDetailPopup";
 import { stopKeepCopy } from "@/lib/executorStopCopy";
+import { mergeById } from "@/lib/range-iceberg";
 import { rangeIcebergEditable } from "@/lib/range-iceberg-edit";
 import { RangeIcebergEditDialog } from "@/components/trade/RangeIcebergEditDialog";
 import { SuccessToast } from "@/components/executor/ExecutorSuccessModal";
@@ -137,6 +139,8 @@ export function TradeBottomPane({
   markPrice = null,
 }: TradeBottomPaneProps) {
   const { server } = useServer();
+  const pairExecutors = usePairExecutors(server, pair);
+  const stopPeers = mergeById([executors, pairExecutors]);
   const queryClient = useQueryClient();
   const containerRef = useRef<HTMLDivElement>(null);
   const [expanded, setExpanded] = useState(() => {
@@ -481,6 +485,8 @@ export function TradeBottomPane({
                       const entry = getEntryPrice(ex);
                       const exit = getExitPrice(ex);
                       const closeLabel = ex.close_type ? ex.close_type.replace(/_/g, " ") : "";
+                      const tierLine = rangeIcebergTierLine(ex);
+                      const pause = entryPause(ex);
                       return (
                         <ExecutorHoverRow
                           key={ex.id}
@@ -507,6 +513,11 @@ export function TradeBottomPane({
                             <span className="rounded bg-[var(--color-bg)] px-1.5 py-0.5 text-[10px] font-medium border border-[var(--color-border)]/50">
                               {executorTypeLabel(ex)}
                             </span>
+                            {tierLine && (
+                              <div className="mt-0.5 max-w-[16rem] font-mono text-[9px] leading-snug text-[var(--color-text-muted)]">
+                                {tierLine}
+                              </div>
+                            )}
                           </td>
                           <td className="px-3 py-1.5">
                             <span
@@ -522,7 +533,11 @@ export function TradeBottomPane({
                               const sizeNote = executorBaseSizeNote(ex, markPrice);
                               return (
                                 <div className="flex flex-col gap-0.5">
-                                  {active ? (
+                                  {active && pause.paused ? (
+                                    <span className="inline-flex w-fit items-center gap-1 rounded-full bg-[var(--color-yellow)]/15 px-1.5 py-0.5 text-[9px] font-bold uppercase text-[var(--color-yellow)]">
+                                      Paused
+                                    </span>
+                                  ) : active ? (
                                     <span className="inline-flex w-fit items-center gap-1 rounded-full bg-[var(--color-green)]/15 px-1.5 py-0.5 text-[9px] font-bold text-[var(--color-green)]">
                                       <span className="h-1.5 w-1.5 rounded-full bg-[var(--color-green)] animate-pulse" />
                                       {detail.halt ? "PAUSED" : "ACTIVE"}
@@ -531,6 +546,16 @@ export function TradeBottomPane({
                                     <span className="rounded px-1.5 py-0.5 text-[9px] font-medium bg-[var(--color-text-muted)]/10 text-[var(--color-text-muted)] capitalize">
                                       {closeLabel || ex.status}
                                     </span>
+                                  )}
+                                  {pause.paused && (
+                                    <>
+                                      {pause.reason && (
+                                        <span className="text-[9px] text-[var(--color-text-muted)]">{pause.reason}</span>
+                                      )}
+                                      {icebergHasExits(ex) && (
+                                        <span className="text-[9px] text-[var(--color-green)]">TP and SL active</span>
+                                      )}
+                                    </>
                                   )}
                                   {detail.filled && (
                                     <span className="font-mono text-[9px] text-[var(--color-text-muted)]">
@@ -785,6 +810,7 @@ export function TradeBottomPane({
           key={editTarget.id}
           executor={editTarget}
           markPrice={markPrice}
+          peers={stopPeers.filter((ex) => ex.id !== editTarget.id)}
           pending={editMutation.isPending}
           error={editError}
           onClose={() => {

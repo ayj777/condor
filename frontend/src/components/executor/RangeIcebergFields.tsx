@@ -320,6 +320,7 @@ export function RangeIcebergFields({
   quoteSymbol,
   maxBase = 0,
   hedge = false,
+  stopWarning = "",
 }: {
   state: OrderState;
   dispatch: React.Dispatch<OrderAction>;
@@ -330,6 +331,8 @@ export function RangeIcebergFields({
   maxBase?: number;
   /** Hedge open and close are the only reduce control. The toggle is hidden. */
   hedge?: boolean;
+  /** Another open iceberg on this pair and side already uses this stop price. */
+  stopWarning?: string;
 }) {
   const [advanced, setAdvanced] = useState(state.ri_show_advanced);
   const set = (field: string, value: unknown) =>
@@ -550,6 +553,9 @@ export function RangeIcebergFields({
         <p className="text-[10px] text-[var(--color-text-muted)]">
           {stopProtectionText(state.side === 1 ? "BUY" : "SELL", stopTrigger)}
         </p>
+      )}
+      {stopWarning && (
+        <p className="text-[10px] text-[var(--color-red)]">{stopWarning}</p>
       )}
       {preview && (
         <div className="rounded border border-[var(--color-border)] bg-[var(--color-bg)] px-2.5 py-2 text-[10px] text-[var(--color-text-muted)]">

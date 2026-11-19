@@ -1,5 +1,5 @@
 import type { ExecutorInfo } from "./api";
-import { executorTypeLabel, rangeIcebergMode } from "./executor-run";
+import { entryPause, executorTypeLabel, icebergHasExits, rangeIcebergMode, rangeIcebergTierFacts } from "./executor-run";
 import { escapeHtml, formatPriceSig } from "./formatters";
 import {
   approximateQuoteLabel,
@@ -822,6 +822,7 @@ export function renderOverlayTooltipHtml(
   const quoteNote = (amount: number, kind: "iceberg" | "order", unit: string) =>
     sizeShownInBase(unit, kind) ? approximateQuoteLabel(amount, sizePrice, quote) : "";
 
+  const pause = entryPause({ custom_info: o.customInfo });
   if (o.type === "range_iceberg") {
     const info = o.customInfo || {};
     const filled = Number(info.filled_amount);
@@ -831,11 +832,23 @@ export function renderOverlayTooltipHtml(
       const note = quoteNote(filled, "iceberg", String(cfg.size_unit ?? info.size_unit ?? ""));
       addRow("Filled", note ? `${text} (${note})` : text);
     }
+    if (pause.paused) {
+      addRow("Paused", pause.reason || "entry paused");
+      if (icebergHasExits({ config: cfg, custom_info: info })) addRow("Exits", "TP and SL active", green);
+    }
     if (info.unknown_order_halt === true) {
       const reason = typeof info.status_reason === "string" && info.status_reason
         ? info.status_reason
         : "unknown_order_halt";
       addRow("Paused", reason, red);
+    }
+    for (const fact of rangeIcebergTierFacts({
+      type: "range_iceberg_executor",
+      trading_pair: o.pair,
+      config: cfg,
+      custom_info: info,
+    })) {
+      addRow(fact.label, fact.value);
     }
     if (cfg.margin_mode != null) addRow("Margin", String(cfg.margin_mode));
   }
@@ -859,6 +872,7 @@ export function renderOverlayTooltipHtml(
             <span style="font-weight:700;font-size:12px;font-family:monospace">${escapeHtml(o.executorId.slice(0, 10))}…</span>
             <span style="background:${sideBg};color:${sideClr};font-size:9px;font-weight:700;padding:1px 5px;border-radius:3px;text-transform:uppercase">${escapeHtml(sideLabel)}</span>
             <span style="background:${statusBg};color:${statusClr};font-size:9px;font-weight:600;padding:1px 5px;border-radius:3px">${escapeHtml(o.status)}</span>
+            ${pause.paused ? `<span style="background:rgba(234,179,8,0.18);color:#ca8a04;font-size:9px;font-weight:700;padding:1px 5px;border-radius:3px;text-transform:uppercase">Paused</span>` : ""}
           </div>
           <div style="display:flex;align-items:center;gap:4px;margin-bottom:2px">
             <span style="background:${border};padding:1px 5px;border-radius:3px;font-size:10px;border:1px solid ${border}">${escapeHtml(o.typeLabel || o.type.toUpperCase())}</span>

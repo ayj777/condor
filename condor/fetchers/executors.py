@@ -661,26 +661,6 @@ async def fetch_all_executors(
     return rows
 
 
-_ALREADY_OPEN_SIDE = re.compile(
-    r"(A range iceberg is already open on \S+ )(BUY|SELL)( for\b)",
-    re.IGNORECASE,
-)
-
-
-def position_side_notice(message: str) -> str:
-    """Say long or short in the one-open range iceberg refusal.
-
-    The trading API names that slot BUY or SELL. The trade page speaks long
-    and short for the same two sides.
-    """
-
-    def repl(match: re.Match[str]) -> str:
-        word = "SHORT" if match.group(2).upper() == "SELL" else "LONG"
-        return f"{match.group(1)}{word}{match.group(3)}"
-
-    return _ALREADY_OPEN_SIDE.sub(repl, message or "")
-
-
 def _parse_embedded(text: str) -> Any:
     """A dict or list embedded in an error string, or None.
 
@@ -743,13 +723,13 @@ def api_error_text(message: Any) -> str:
 
     A 409 from a range iceberg edit is ``{"accepted": false, "reason": ...}``.
     A 422 is a list of ``msg`` entries. A string detail is returned unchanged,
-    apart from the one-open iceberg sentence, which says long or short.
+    including a refusal that names BUY or SELL.
     """
     extracted = _structured_error_text(message)
     if extracted:
-        return position_side_notice(extracted)
+        return extracted
     if isinstance(message, str) and message.strip():
-        return position_side_notice(message.strip())
+        return message.strip()
     return ""
 
 

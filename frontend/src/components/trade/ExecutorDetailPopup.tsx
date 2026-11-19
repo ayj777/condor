@@ -162,6 +162,11 @@ export function ExecutorDetailPopup({
         {model.positionSide && (
           <span className="text-[10px] text-[var(--color-text-muted)]">{model.positionSide}</span>
         )}
+        {model.entryPaused && (
+          <span className="rounded bg-[var(--color-yellow)]/15 px-1 py-0.5 text-[9px] font-bold uppercase text-[var(--color-yellow)]">
+            Paused
+          </span>
+        )}
         {model.status && (
           <span className="ml-auto text-[10px] capitalize text-[var(--color-text-muted)]">{model.status}</span>
         )}

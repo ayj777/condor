@@ -48,7 +48,7 @@ import { useLastClose } from "@/hooks/useCandleStore";
 import { usePairBalances } from "@/hooks/usePairBalances";
 import { useServer } from "@/hooks/useServer";
 import { useCondorWebSocket } from "@/hooks/useWebSocket";
-import { useMainControllerData } from "@/hooks/useMainControllerData";
+import { useMainControllerData, usePairExecutors } from "@/hooks/useMainControllerData";
 import { useResizeDrag } from "@/hooks/useResizeDrag";
 import { api } from "@/lib/api";
 import { candleStore } from "@/lib/candle-store";
@@ -65,7 +65,7 @@ import {
 } from "@/lib/gridExecutor";
 import { formatConnectorName, formatPriceSig } from "@/lib/formatters";
 import { baseAmountError, legalBaseAmount, plainOrderPrice, plainOrderSentSize, plainOrderSummary } from "@/lib/order-size";
-import { icebergSentSize, oneAtATimeText, scheduleNote } from "@/lib/range-iceberg";
+import { icebergSentSize, mergeById, oneAtATimeText, sameStopPriceWarning, scheduleNote } from "@/lib/range-iceberg";
 import { applyHedge, applyReducing, bookForOrder, canonicalPositionMode, claimInflight, ICEBERG_MARGIN_HOLD, icebergCreateHeld, isHedge, marginForOpen, MARGIN_CHOOSE, orderCap, ordersBlockCreate, positionModeBlocksCreate, sideHasOpenPosition, type HedgeBooks, type OpenBook } from "@/lib/trade-guards";
 import { useViewFacts } from "@/lib/viewFacts";
 
@@ -256,6 +256,7 @@ export function CreateExecutor() {
   // Main controller data (executors + positions filtered by connector/pair)
   const { executors: mainExecutors, overlays: mainOverlays, positions: mainPositions, isLoadingPositions, isPositionsError } =
     useMainControllerData(server, connector, pair);
+  const pairExecutors = usePairExecutors(server, pair);
 
   // Current price. /market/prices only answers for a Hummingbot connector, so a
   // venue without that trait reads the last close off the candle stream instead. The store is
@@ -779,10 +780,16 @@ export function CreateExecutor() {
     },
   });
 
+  const icebergStopWarning =
+    executorType === "iceberg" || orderConfig.state.execution_strategy === "RANGE_ICEBERG"
+      ? sameStopPriceWarning(rangeIcebergInput(orderConfig.state), pair, mergeById([mainExecutors, pairExecutors])) ?? ""
+      : "";
+
   // Create mutation
   const createMutation = useMutation({
     mutationFn: () => {
       if (!server) throw new Error("No server");
+      if (icebergStopWarning) throw new Error(icebergStopWarning);
       // Belt to the overlay's braces: the footer is covered on a view-only
       // venue, so this is unreachable from the UI — but the panel should not be
       // one stray caller away from posting a create it knows the venue will
@@ -1201,10 +1208,10 @@ export function CreateExecutor() {
                     <PositionConfigPanel state={positionConfig.state} dispatch={positionConfig.dispatch} validation={positionConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} sizeRule={pairRule} />
                   )}
                   {executorType === "order" && (
-                    <OrderConfigPanel state={orderConfig.state} dispatch={orderConfig.dispatch} validation={orderConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} connector={connector} strategies={orderStrategies} marginModes={caps.marginModes} sizeRule={pairRule} positionLeverage={orderLeverage} openBook={openBook} positionMode={canonicalPositionMode(positionModeQuery.data?.position_mode ?? "")} onApplyLeverage={() => leverageMutation.mutate()} applyingLeverage={leverageMutation.isPending} positionsLoaded={!isLoadingPositions} positionsFailed={isPositionsError} onStrategyHold={setStrategyHold} baseAvailable={balances.base} quoteAvailable={balances.quote} books={hedgeBooks} />
+                    <OrderConfigPanel state={orderConfig.state} dispatch={orderConfig.dispatch} validation={orderConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} connector={connector} strategies={orderStrategies} marginModes={caps.marginModes} sizeRule={pairRule} positionLeverage={orderLeverage} openBook={openBook} positionMode={canonicalPositionMode(positionModeQuery.data?.position_mode ?? "")} onApplyLeverage={() => leverageMutation.mutate()} applyingLeverage={leverageMutation.isPending} positionsLoaded={!isLoadingPositions} positionsFailed={isPositionsError} onStrategyHold={setStrategyHold} baseAvailable={balances.base} quoteAvailable={balances.quote} books={hedgeBooks} stopWarning={icebergStopWarning} />
                   )}
                   {executorType === "iceberg" && (
-                    <OrderConfigPanel state={orderConfig.state} dispatch={orderConfig.dispatch} validation={orderConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} connector={connector} strategies={orderStrategies} marginModes={caps.marginModes} sizeRule={pairRule} lockStrategy positionLeverage={orderLeverage} openBook={openBook} positionMode={canonicalPositionMode(positionModeQuery.data?.position_mode ?? "")} onApplyLeverage={() => leverageMutation.mutate()} applyingLeverage={leverageMutation.isPending} positionsLoaded={!isLoadingPositions} positionsFailed={isPositionsError} baseAvailable={balances.base} quoteAvailable={balances.quote} books={hedgeBooks} />
+                    <OrderConfigPanel state={orderConfig.state} dispatch={orderConfig.dispatch} validation={orderConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} connector={connector} strategies={orderStrategies} marginModes={caps.marginModes} sizeRule={pairRule} lockStrategy positionLeverage={orderLeverage} openBook={openBook} positionMode={canonicalPositionMode(positionModeQuery.data?.position_mode ?? "")} onApplyLeverage={() => leverageMutation.mutate()} applyingLeverage={leverageMutation.isPending} positionsLoaded={!isLoadingPositions} positionsFailed={isPositionsError} baseAvailable={balances.base} quoteAvailable={balances.quote} books={hedgeBooks} stopWarning={icebergStopWarning} />
                   )}
                   {executorType === "dca" && (
                     <DCAConfigPanel state={dcaConfig.state} dispatch={dcaConfig.dispatch} validation={dcaConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} />
@@ -1232,6 +1239,9 @@ export function CreateExecutor() {
                   {marginBlocked && (
                     <p className="mb-2 text-[11px] text-[var(--color-red)]">{MARGIN_CHOOSE}</p>
                   )}
+                  {icebergStopWarning && (
+                    <p className="mb-2 text-[11px] text-[var(--color-red)]">{icebergStopWarning}</p>
+                  )}
                   <button
                     onClick={() => {
                       if (!claimInflight(createLock)) return;
@@ -1241,7 +1251,7 @@ export function CreateExecutor() {
                         },
                       });
                     }}
-                    disabled={!caps.canTrade || !activeValidation.valid || createMutation.isPending || ordersBlockCreate(executorType, caps.hasOrderBook, ordersHealth.isError) || strategyHold || icebergHeld || modeUnread || marginBlocked || (executorType === "order" && !orderStrategies.includes(orderConfig.state.execution_strategy))}
+                    disabled={!caps.canTrade || !activeValidation.valid || createMutation.isPending || ordersBlockCreate(executorType, caps.hasOrderBook, ordersHealth.isError) || strategyHold || icebergHeld || modeUnread || marginBlocked || Boolean(icebergStopWarning) || (executorType === "order" && !orderStrategies.includes(orderConfig.state.execution_strategy))}
                     className="flex w-full items-center justify-center gap-2 rounded-lg bg-[var(--color-primary)] px-4 py-2.5 text-sm font-bold text-white transition-colors hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     {createMutation.isPending ? (

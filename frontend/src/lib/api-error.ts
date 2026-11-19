@@ -6,16 +6,6 @@
  * sends a list of field errors.
  */
 
-const ALREADY_OPEN = /(A range iceberg is already open on \S+ )(BUY|SELL)( for\b)/i;
-
-/** LONG and SHORT in the one-open iceberg refusal. Other text is unchanged. */
-export function positionSideNotice(message: string): string {
-  return message.replace(ALREADY_OPEN, (_match, lead: string, side: string, rest: string) => {
-    const word = side.toUpperCase() === "SELL" ? "SHORT" : "LONG";
-    return `${lead}${word}${rest}`;
-  });
-}
-
 function fieldError(item: unknown): string {
   if (!item || typeof item !== "object") return "";
   const row = item as { msg?: unknown; loc?: unknown };
@@ -45,7 +35,7 @@ export function apiErrorMessage(body: unknown, status: number): string {
     ? (body as { detail?: unknown }).detail
     : undefined;
   const text = detailText(detail);
-  if (text) return positionSideNotice(text);
+  if (text) return text;
   return `Request failed: ${status}`;
 }
 

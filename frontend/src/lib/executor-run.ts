@@ -1,11 +1,14 @@
 import type { ExecutorInfo } from "@/lib/api";
-import { isExecutorActive } from "@/lib/formatters";
+import { formatPriceSig, isExecutorActive } from "@/lib/formatters";
 import {
   approximateQuoteLabel,
+  formatTokenAmount,
   pairTokens,
   referenceSizePrice,
   sizeShownInBase,
+  sizeUnitSymbol,
 } from "@/lib/order-size";
+import { formatInterval, parseDuration } from "@/lib/range-iceberg";
 
 const STRATEGY_LABELS: Record<string, string> = {
   LIMIT: "Limit",
@@ -44,6 +47,92 @@ export function executorTypeLabel(ex: ExecutorInfo): string {
 export function displayedExecutorType(ex: ExecutorInfo): string {
   if ((ex.type || "").toLowerCase().includes("range_iceberg")) return executorTypeLabel(ex);
   return ex.type || "—";
+}
+
+function tierNumber(value: unknown): number | null {
+  if (value == null || value === "") return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function tierPrice(value: number): string {
+  const raw = formatPriceSig(value);
+  if (!raw.includes(".")) return raw;
+  return raw.replace(/(\.\d*?)0+$/, "$1").replace(/\.$/, "");
+}
+
+/** A live size unit wins. A resumed iceberg can be base while config still says quote. An absent unit is quote. */
+export function icebergSizeUnitRaw(source: {
+  config?: Record<string, unknown> | null;
+  custom_info?: Record<string, unknown> | null;
+}): string {
+  const info = source.custom_info ?? {};
+  const cfg = source.config ?? {};
+  const live = tierText(info.size_unit);
+  return live || tierText(cfg.size_unit);
+}
+
+function tierText(value: unknown): string {
+  if (value == null) return "";
+  const raw = String(value).trim();
+  if (!raw || raw === "null" || raw === "undefined" || raw === "None") return "";
+  return raw;
+}
+
+/**
+ * The fields that tell one iceberg tier from another on the same pair and side.
+ *
+ * Group is omitted when the executor has none. Sibling base is omitted unless
+ * `custom_info.sibling_base` is set.
+ */
+export function rangeIcebergTierFacts(ex: {
+  type?: string;
+  trading_pair?: string;
+  config?: Record<string, unknown> | null;
+  custom_info?: Record<string, unknown> | null;
+}): { label: string; value: string }[] {
+  if (!(ex.type || "").toLowerCase().includes("range_iceberg")) return [];
+  const info = ex.custom_info ?? {};
+  const cfg = ex.config ?? {};
+  const rows: { label: string; value: string }[] = [];
+  const mode = rangeIcebergMode(ex);
+  if (mode === "UP_TO") {
+    const limit = tierNumber(cfg.limit_price ?? info.limit_price);
+    if (limit != null && limit > 0) rows.push({ label: "Limit", value: tierPrice(limit) });
+  } else {
+    const low = tierNumber(cfg.price_low ?? info.price_low);
+    const high = tierNumber(cfg.price_high ?? info.price_high);
+    if (low != null && high != null && low > 0 && high > 0) {
+      rows.push({ label: "Range", value: `${tierPrice(low)} to ${tierPrice(high)}` });
+    }
+  }
+  const total = tierNumber(cfg.total_amount ?? info.target_amount);
+  if (total != null && total > 0) {
+    const unit = sizeUnitSymbol(icebergSizeUnitRaw(ex) || "QUOTE", ex.trading_pair);
+    const text = formatTokenAmount(total);
+    rows.push({ label: "Total", value: unit ? `${text} ${unit}` : text });
+  }
+  const duration = tierText(cfg.duration ?? info.duration);
+  if (duration) {
+    const seconds = parseDuration(duration);
+    rows.push({ label: "Duration", value: seconds != null ? formatInterval(seconds) : duration });
+  }
+  const group = tierText(cfg.group_id ?? info.group_id);
+  if (group) rows.push({ label: "Group", value: group });
+  if (Object.prototype.hasOwnProperty.call(info, "sibling_base")) {
+    const sibling = tierNumber(info.sibling_base);
+    if (sibling != null) {
+      const base = pairTokens(ex.trading_pair).base;
+      const text = formatTokenAmount(sibling);
+      rows.push({ label: "Sibling base", value: base ? `${text} ${base}` : text });
+    }
+  }
+  return rows;
+}
+
+/** One line for the executor list. Empty for anything that is not a range iceberg. */
+export function rangeIcebergTierLine(ex: ExecutorInfo): string {
+  return rangeIcebergTierFacts(ex).map((row) => row.value).join(" · ");
 }
 
 function editText(value: unknown): string {
@@ -112,12 +201,58 @@ export function executorBaseSizeNote(ex: ExecutorInfo, mark?: number | null): st
   const info = (ex.custom_info ?? {}) as Record<string, unknown>;
   const cfg = (ex.config ?? {}) as Record<string, unknown>;
   const iceberg = (ex.type || "").toLowerCase().includes("range_iceberg");
-  const unit = String(cfg.size_unit ?? info.size_unit ?? "");
+  const unit = icebergSizeUnitRaw(ex);
   if (!sizeShownInBase(unit, iceberg ? "iceberg" : "order")) return "";
   const filled = Number(info.filled_base ?? info.filled_amount);
   if (!(filled > 0)) return "";
   const price = referenceSizePrice([info, cfg, { current_price: ex.current_price }], mark);
   return approximateQuoteLabel(filled, price, pairTokens(ex.trading_pair).quote);
+}
+
+/**
+ * A shallower iceberg whose entries are held while a deeper tier is the one
+ * the price qualifies for. Exits keep working. This is not an order halt.
+ */
+export function entryPause(source: {
+  custom_info?: Record<string, unknown> | null;
+}): { paused: boolean; reason: string } {
+  const info = source.custom_info ?? {};
+  const raw = info.entry_paused;
+  const paused = raw === true || raw === "true" || raw === 1 || raw === "1";
+  if (!paused) return { paused: false, reason: "" };
+  const reason = typeof info.pause_reason === "string" ? info.pause_reason.trim() : "";
+  return { paused: true, reason };
+}
+
+function exitConfigured(value: unknown): boolean {
+  if (value == null || value === "" || value === false) return false;
+  if (typeof value === "number") return value > 0;
+  if (typeof value === "string") {
+    const text = value.trim();
+    if (!text || text === "null" || text === "None") return false;
+    const n = Number(text);
+    return Number.isFinite(n) ? n > 0 : true;
+  }
+  if (typeof value === "object" && !Array.isArray(value)) {
+    const row = value as Record<string, unknown>;
+    return exitConfigured(row.price) || exitConfigured(row.percent);
+  }
+  return false;
+}
+
+/** True when this iceberg actually has a take profit or a stop loss. */
+export function icebergHasExits(source: {
+  config?: Record<string, unknown> | null;
+  custom_info?: Record<string, unknown> | null;
+}): boolean {
+  const info = source.custom_info ?? {};
+  const cfg = source.config ?? {};
+  return (
+    exitConfigured(info.take_profit_trigger_price) ||
+    exitConfigured(info.stop_loss_trigger_price) ||
+    exitConfigured(cfg.take_profit ?? info.take_profit) ||
+    exitConfigured(cfg.stop_loss ?? info.stop_loss)
+  );
 }
 
 /** Filled size, halt reason, and whether resume is meaningful for this row. */

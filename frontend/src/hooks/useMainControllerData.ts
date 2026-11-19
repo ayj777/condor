@@ -46,6 +46,18 @@ interface Options {
   poolAddress?: string;
 }
 
+/** Every executor on this pair, on any controller. The stop check needs them. */
+export function usePairExecutors(server: string | null, pair: string): ExecutorInfo[] {
+  const { data } = useQuery<ExecutorInfo[]>({
+    queryKey: executorsQuery(server, { pair }).queryKey,
+    queryFn: () => api.getExecutors(server!, { trading_pair: pair }),
+    enabled: !!server && !!pair,
+    staleTime: 30_000,
+    refetchOnWindowFocus: false,
+  });
+  return data ?? [];
+}
+
 export function useMainControllerData(
   server: string | null,
   connector: string,

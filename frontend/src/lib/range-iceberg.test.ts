@@ -10,6 +10,8 @@ import {
   rangeIcebergConfig,
   rangeIcebergPreview,
   scheduleHasRemainder,
+  mergeById,
+  sameStopPriceWarning,
   scheduleNote,
   scheduleSliceCount,
   validateRangeIceberg,
@@ -70,6 +72,100 @@ function exit(over: Partial<RangeIcebergExitInput> = {}): RangeIcebergExitInput 
     ...over,
   };
 }
+
+describe("same stop price", () => {
+  const open = {
+    type: "range_iceberg_executor",
+    side: "BUY",
+    status: "running",
+    trading_pair: "AIOT-USDT",
+    config: { stop_loss: { price: "0.07", execution: "SINGLE" } },
+    custom_info: {},
+  };
+
+  it("warns when another open iceberg on this side uses the same stop price", () => {
+    const warning = sameStopPriceWarning(
+      input({ mode: "UP_TO", limitPrice: 0.1, stopLoss: exit({ trigger: "price", price: 0.07 }) }),
+      "AIOT-USDT",
+      [open],
+    );
+    expect(warning).toContain("0.07");
+    expect(warning).toContain("same stop price");
+    expect(warning).toContain("409");
+    expect(warning).toContain("Create stays off");
+  });
+
+  it("includes an iceberg from another controller in the stop check", () => {
+    const visible = [{
+      id: "ri-main",
+      type: "range_iceberg_executor",
+      side: "BUY",
+      status: "running",
+      trading_pair: "AIOT-USDT",
+      config: { stop_loss: { price: "0.05" } },
+      custom_info: {},
+    }];
+    const fetched = [{
+      id: "ri-other",
+      type: "range_iceberg_executor",
+      side: "BUY",
+      status: "running",
+      trading_pair: "AIOT-USDT",
+      config: { stop_loss: { price: "0.07" } },
+      custom_info: {},
+    }];
+    const rows = mergeById([visible, fetched]);
+    expect(rows.map((row) => row.id)).toEqual(["ri-main", "ri-other"]);
+    const warning = sameStopPriceWarning(
+      input({ mode: "UP_TO", limitPrice: 0.1, stopLoss: exit({ trigger: "price", price: 0.07 }) }),
+      "AIOT-USDT",
+      rows,
+    );
+    expect(warning).toContain("409");
+  });
+
+  it("warns when the open tier stores the same stop as a percent off the limit", () => {
+    const draft = input({
+      mode: "UP_TO",
+      limitPrice: 0.08,
+      stopLoss: exit({ trigger: "percent", price: 0, percent: 0.01 }),
+    });
+    const warning = sameStopPriceWarning(draft, "AIOT-USDT", [{
+      type: "range_iceberg_executor",
+      side: "BUY",
+      status: "running",
+      trading_pair: "AIOT-USDT",
+      config: {
+        mode: "UP_TO",
+        limit_price: 0.08,
+        stop_loss: { percent: "0.01", execution: "SINGLE" },
+      },
+      custom_info: {},
+    }]);
+    expect(warning).toContain("409");
+    expect(warning).toContain("Create stays off");
+  });
+
+  it("stays quiet for a different price, side, pair, or a stopped iceberg", () => {
+    const draft = input({ mode: "UP_TO", limitPrice: 0.1, stopLoss: exit({ trigger: "price", price: 0.06 }) });
+    expect(sameStopPriceWarning(draft, "AIOT-USDT", [open])).toBeNull();
+    expect(sameStopPriceWarning(
+      input({ side: "SELL", mode: "UP_TO", limitPrice: 0.1, stopLoss: exit({ trigger: "price", price: 0.07 }) }),
+      "AIOT-USDT",
+      [open],
+    )).toBeNull();
+    expect(sameStopPriceWarning(
+      input({ mode: "UP_TO", limitPrice: 0.1, stopLoss: exit({ trigger: "price", price: 0.07 }) }),
+      "BTC-USDT",
+      [open],
+    )).toBeNull();
+    expect(sameStopPriceWarning(
+      input({ mode: "UP_TO", limitPrice: 0.1, stopLoss: exit({ trigger: "price", price: 0.07 }) }),
+      "AIOT-USDT",
+      [{ ...open, status: "terminated" }],
+    )).toBeNull();
+  });
+});
 
 describe("one order at a time", () => {
   it("says the next order waits for a fill, and names the interval when one is set", () => {

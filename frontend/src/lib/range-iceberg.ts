@@ -289,6 +289,114 @@ export function exitTriggerPrice(
   return reference * (above ? 1 + exit.percent : 1 - exit.percent);
 }
 
+/** Rows from the visible list and a wider fetch, with the later copy winning. */
+export function mergeById<T extends { id?: string }>(groups: T[][]): T[] {
+  const map = new Map<string, T>();
+  for (const group of groups) {
+    for (const row of group) {
+      if (row.id) map.set(row.id, row);
+    }
+  }
+  return [...map.values()];
+}
+
+export interface OpenIcebergStop {
+  type?: string;
+  side?: string;
+  status?: string;
+  trading_pair?: string;
+  config?: Record<string, unknown> | null;
+  custom_info?: Record<string, unknown> | null;
+}
+
+function finitePrice(value: unknown): number | null {
+  if (value == null || value === "") return null;
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+function samePrice(left: number, right: number): boolean {
+  const scale = Math.max(Math.abs(left), Math.abs(right), 1);
+  return Math.abs(left - right) <= scale * 1e-8;
+}
+
+/** The stop price this create would send, or the percent estimated from the limit or mid. */
+export function configuredStopPrice(input: RangeIcebergInput): number | null {
+  const exit = input.stopLoss;
+  if (!exit) return null;
+  if (exit.trigger === "price") return exit.price > 0 ? exit.price : null;
+  const reference = exitReference(input);
+  if (!reference) return null;
+  return exitTriggerPrice(input.side, "stop_loss", exit, reference.price);
+}
+
+function storedMode(source: OpenIcebergStop): string {
+  const info = source.custom_info ?? {};
+  const cfg = source.config ?? {};
+  const raw = info.mode ?? cfg.mode ?? "RANGE";
+  return String(raw).trim().replace(/[\s-]+/g, "_").toUpperCase();
+}
+
+function storedReference(source: OpenIcebergStop): number | null {
+  const info = source.custom_info ?? {};
+  const cfg = source.config ?? {};
+  if (storedMode(source) === "UP_TO") return finitePrice(cfg.limit_price ?? info.limit_price);
+  const low = finitePrice(cfg.price_low ?? info.price_low);
+  const high = finitePrice(cfg.price_high ?? info.price_high);
+  if (low != null && high != null && low <= high) return (low + high) / 2;
+  return null;
+}
+
+function tradeSide(raw: unknown): "BUY" | "SELL" | null {
+  const text = String(raw ?? "").replace(/^.*\./, "").trim().toUpperCase();
+  if (text === "BUY" || text === "SELL") return text;
+  return null;
+}
+
+function storedStopPrice(source: OpenIcebergStop): number | null {
+  const info = source.custom_info ?? {};
+  const cfg = source.config ?? {};
+  const live = finitePrice(info.stop_loss_trigger_price);
+  if (live != null) return live;
+  const stop = cfg.stop_loss ?? info.stop_loss;
+  if (!stop || typeof stop !== "object" || Array.isArray(stop)) return null;
+  const row = stop as Record<string, unknown>;
+  const price = finitePrice(row.price);
+  if (price != null) return price;
+  const percent = finitePrice(row.percent);
+  if (percent == null || percent >= 1) return null;
+  const side = tradeSide(source.side || cfg.side || info.side);
+  const reference = storedReference(source);
+  if (!side || reference == null) return null;
+  return exitTriggerPrice(side, "stop_loss", { trigger: "percent", percent, price: 0 }, reference);
+}
+
+/**
+ * Set when another running iceberg on this pair and side already uses this
+ * stop price. Create stays off. The trading API returns 409 for that duplicate.
+ */
+export function sameStopPriceWarning(
+  input: RangeIcebergInput,
+  pair: string,
+  executors: OpenIcebergStop[],
+): string | null {
+  const mine = configuredStopPrice(input);
+  if (mine == null) return null;
+  const side = input.side.toUpperCase();
+  const clash = executors.some((ex) => {
+    if (!(ex.type || "").toLowerCase().includes("range_iceberg")) return false;
+    const status = (ex.status || "").toLowerCase();
+    if (status !== "running" && status !== "active") return false;
+    if ((ex.trading_pair || "") !== pair) return false;
+    const theirsSide = String(ex.side || "").replace(/^.*\./, "").toUpperCase();
+    if (theirsSide !== side) return false;
+    const theirs = storedStopPrice(ex);
+    return theirs != null && samePrice(mine, theirs);
+  });
+  if (!clash) return null;
+  return `Another open iceberg on this side already uses stop ${formatTriggerPrice(mine)}. Create stays off. The trading API returns 409 and refuses two tiers with the same stop price.`;
+}
+
 export function formatTriggerPrice(price: number): string {
   if (!(price > 0) || !Number.isFinite(price)) return "";
   const precise = Number(price.toPrecision(8));
