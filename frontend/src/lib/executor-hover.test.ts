@@ -428,6 +428,36 @@ describe("executor hover details", () => {
     expect(flat.warnings).toEqual([]);
     expect(flat.rows.find((row) => row.label === "Exchange stop")).toBeUndefined();
   });
+
+  it("shows a pending config edit and a config edit error when the executor sends them", () => {
+    const pending = executorHoverModel(
+      executor({
+        timestamp: 0,
+        pnl: 0,
+        custom_info: { pending_config_edit: { total_amount: "150", stop_loss: null } },
+      }),
+    );
+    expect(pending.warnings).toEqual([
+      { title: "Config edit pending", detail: "total_amount, stop_loss" },
+    ]);
+
+    const failed = executorHoverModel(
+      executor({
+        timestamp: 0,
+        pnl: 0,
+        custom_info: { config_edit_error: "cannot shrink total_amount below the filled amount" },
+      }),
+    );
+    expect(failed.warnings).toEqual([
+      {
+        title: "Config edit failed",
+        detail: "cannot shrink total_amount below the filled amount",
+      },
+    ]);
+
+    const quiet = executorHoverModel(executor({ timestamp: 0, pnl: 0, custom_info: {} }));
+    expect(quiet.warnings).toEqual([]);
+  });
 });
 
 describe("placePopup", () => {

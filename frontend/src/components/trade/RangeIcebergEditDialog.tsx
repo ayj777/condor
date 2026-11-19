@@ -6,7 +6,6 @@ import { orderReducer } from "@/components/executor/order-config";
 import { ErrorToast } from "@/components/executor/ExecutorSuccessModal";
 import { positionSideNotice } from "@/lib/api-error";
 import type { ExecutorInfo } from "@/lib/api";
-import { pairTokens, formatTokenAmount } from "@/lib/order-size";
 import { exitReference } from "@/lib/range-iceberg";
 import {
   draftFromOrderState,
@@ -14,7 +13,9 @@ import {
   orderStateForEdit,
   rangeIcebergEditFromExecutor,
   rangeIcebergEditPatch,
-  rangeIcebergFilled,
+  rangeIcebergFilledCaption,
+  rangeIcebergFilledInUnit,
+  rangeIcebergTotalUnitLabel,
   validateRangeIcebergEdit,
 } from "@/lib/range-iceberg-edit";
 
@@ -35,7 +36,9 @@ export function RangeIcebergEditDialog({
   onClose: () => void;
   onSubmit: (body: Record<string, unknown>) => void;
 }) {
-  const filled = rangeIcebergFilled(executor);
+  const filled = rangeIcebergFilledInUnit(executor);
+  const filledCaption = rangeIcebergFilledCaption(executor, executor.trading_pair);
+  const totalUnit = rangeIcebergTotalUnitLabel(executor, executor.trading_pair);
   const before = normalizedEditDraft(rangeIcebergEditFromExecutor(executor));
   const [state, dispatch] = useReducer(orderReducer, before, orderStateForEdit);
   const [localError, setLocalError] = useState<string | null>(null);
@@ -46,7 +49,6 @@ export function RangeIcebergEditDialog({
     priceLow: draft.priceLow,
     priceHigh: draft.priceHigh,
   });
-  const base = pairTokens(executor.trading_pair).base;
   const which = draft.side === "SELL" ? "short" : "long";
   const kind = draft.mode === "UP_TO" ? "limit iceberg" : "range iceberg";
 
@@ -71,12 +73,14 @@ export function RangeIcebergEditDialog({
         <p className="text-sm text-[var(--color-text)]">
           Edit {which} {kind}
         </p>
-        <p className="mt-1 font-mono text-[11px] text-[var(--color-text-muted)]">
-          Filled {formatTokenAmount(filled)}{base ? ` ${base}` : ""}
-        </p>
+        {filledCaption && (
+          <p className="mt-1 font-mono text-[11px] text-[var(--color-text-muted)]">
+            Filled {filledCaption}
+          </p>
+        )}
         <div className="mt-3 space-y-2.5">
           <NumberField
-            label={base ? `Total amount (${base})` : "Total amount"}
+            label={totalUnit ? `Total amount (${totalUnit})` : "Total amount"}
             value={state.ri_total_amount}
             field="ri_total_amount"
             dispatch={dispatch}

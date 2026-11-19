@@ -1,6 +1,7 @@
 import type { OrderState } from "@/components/executor/order-config";
 import { ORDER_DEFAULTS, rangeIcebergInput } from "@/components/executor/order-config";
 import { rangeIcebergMode } from "@/lib/executor-run";
+import { formatTokenAmount, pairTokens } from "@/lib/order-size";
 import {
   rangeIcebergExitConfig,
   validateRangeIcebergExits,
@@ -102,15 +103,111 @@ function readExit(raw: unknown): RangeIcebergExitInput | null {
   };
 }
 
-/** Filled base. `filled_base` wins when the executor sent it, including 0. */
-export function rangeIcebergFilled(source: RangeIcebergEditSource): number {
-  const info = source.custom_info ?? {};
-  if ("filled_base" in info && info.filled_base != null && info.filled_base !== "") {
-    const filled = num(info.filled_base);
-    if (filled >= 0) return filled;
+export type RangeIcebergSizeUnit = "BASE" | "QUOTE" | "CONTRACTS";
+
+function bags(source: RangeIcebergEditSource): Record<string, unknown>[] {
+  return [source.custom_info ?? {}, source.config ?? {}, source as Record<string, unknown>];
+}
+
+function ownNumber(records: Record<string, unknown>[], keys: string[]): number | null {
+  for (const record of records) {
+    for (const key of keys) {
+      if (!Object.prototype.hasOwnProperty.call(record, key)) continue;
+      const value = record[key];
+      if (value == null || value === "") continue;
+      const parsed = num(value);
+      if (parsed >= 0) return parsed;
+    }
   }
-  const amount = num(info.filled_amount);
-  return amount > 0 ? amount : 0;
+  return null;
+}
+
+function sizeUnitToken(value: unknown): RangeIcebergSizeUnit | null {
+  const raw = token(value).split("_").pop() ?? "";
+  if (raw === "BASE") return "BASE";
+  if (raw === "QUOTE") return "QUOTE";
+  if (raw === "CONTRACT" || raw === "CONTRACTS") return "CONTRACTS";
+  return null;
+}
+
+/**
+ * The unit `total_amount` is denominated in.
+ *
+ * A live `custom_info.size_unit` wins, because a resumed iceberg can be sized
+ * in base while the saved config still says quote. An absent unit is quote,
+ * which is the executor default.
+ */
+export function rangeIcebergSizeUnit(source: RangeIcebergEditSource): RangeIcebergSizeUnit {
+  const info = source.custom_info ?? {};
+  return sizeUnitToken(info.size_unit) ?? sizeUnitToken(source.config?.size_unit) ?? "QUOTE";
+}
+
+/**
+ * Filled size in the same unit as `total_amount`.
+ *
+ * `filled_quote` and `filled_amount` are already in that unit when the
+ * executor sends them. Otherwise a quote fill is base times the average fill,
+ * and a contract fill is base divided by the contract size. Null means the
+ * client cannot tell, so the shrink check is left to the trading API.
+ */
+export function rangeIcebergFilledInUnit(source: RangeIcebergEditSource): number | null {
+  const records = bags(source);
+  const unit = rangeIcebergSizeUnit(source);
+  const filledBase = ownNumber(records, ["filled_base"]);
+  const filledQuote = ownNumber(records, ["filled_quote", "filled_amount_quote"]);
+  const filledAmount = ownNumber(records, ["filled_amount"]);
+  const average = ownNumber(records, [
+    "average_fill_price",
+    "avg_fill_price",
+    "average_filled_price",
+    "average_entry_price",
+    "current_position_average_price",
+  ]);
+  const contractSize = ownNumber(records, ["contract_size", "contractSize"]);
+
+  if (unit === "BASE") {
+    if (filledBase != null) return filledBase;
+    if (filledAmount != null) return filledAmount;
+    if (filledQuote != null && average != null && average > 0) return filledQuote / average;
+    return null;
+  }
+  if (unit === "CONTRACTS") {
+    if (filledAmount != null) return filledAmount;
+    if (filledBase === 0) return 0;
+    if (filledBase != null && contractSize != null && contractSize > 0) return filledBase / contractSize;
+    return null;
+  }
+  if (filledQuote != null) return filledQuote;
+  if (filledAmount != null) return filledAmount;
+  if (filledBase === 0) return 0;
+  if (filledBase != null && average != null && average > 0) return filledBase * average;
+  return null;
+}
+
+/** Ticker next to the total, matching `rangeIcebergSizeUnit`. */
+export function rangeIcebergTotalUnitLabel(source: RangeIcebergEditSource, pair?: string): string {
+  const { base, quote } = pairTokens(pair);
+  const unit = rangeIcebergSizeUnit(source);
+  if (unit === "QUOTE") return quote || "quote";
+  if (unit === "CONTRACTS") return "contracts";
+  return base || "base";
+}
+
+/**
+ * Filled text for the form. The in-unit amount is used when it is known.
+ * A base fill with no conversion is still shown, labeled in the base ticker,
+ * and is not used as the shrink limit.
+ */
+export function rangeIcebergFilledCaption(source: RangeIcebergEditSource, pair?: string): string {
+  const { base } = pairTokens(pair);
+  const inUnit = rangeIcebergFilledInUnit(source);
+  if (inUnit != null) {
+    const label = rangeIcebergTotalUnitLabel(source, pair);
+    return [formatTokenAmount(inUnit), label].filter(Boolean).join(" ");
+  }
+  const filledBase = ownNumber([source.custom_info ?? {}], ["filled_base"]);
+  if (filledBase == null) return "";
+  return [formatTokenAmount(filledBase), base].filter(Boolean).join(" ");
 }
 
 /** Running range icebergs can be edited. A parked or closing row cannot. */
@@ -222,9 +319,9 @@ export function normalizedEditDraft(draft: RangeIcebergEditDraft): RangeIcebergE
   return draftFromOrderState(orderStateForEdit(draft));
 }
 
-export function validateRangeIcebergEdit(draft: RangeIcebergEditDraft, filled: number): string | null {
+export function validateRangeIcebergEdit(draft: RangeIcebergEditDraft, filled: number | null): string | null {
   if (!(draft.totalAmount > 0)) return "Total amount is required";
-  if (filled > 0 && draft.totalAmount + 1e-9 < filled) {
+  if (filled != null && filled > 0 && draft.totalAmount + 1e-9 < filled) {
     return "Total amount cannot be below the filled amount";
   }
   if (draft.mode === "RANGE") {
@@ -267,6 +364,35 @@ function editExitPayload(
   return body;
 }
 
+function numericToken(value: unknown): number | null {
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (typeof value !== "string") return null;
+  const text = value.trim();
+  if (!/^[+-]?(?:\d+\.?\d*|\.\d+)$/.test(text)) return null;
+  const parsed = Number(text);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+/** `5`, `"5"`, and `"5.0"` are one interval. `30s` stays text. */
+function sameToken(left: unknown, right: unknown): boolean {
+  const a = numericToken(left);
+  const b = numericToken(right);
+  if (a != null && b != null) return sameAmount(a, b);
+  return String(left ?? "") === String(right ?? "");
+}
+
+function sameExit(
+  left: Record<string, unknown> | null,
+  right: Record<string, unknown> | null,
+): boolean {
+  if (left == null || right == null) return left == null && right == null;
+  const keys = new Set([...Object.keys(left), ...Object.keys(right)]);
+  for (const key of keys) {
+    if (!sameToken(left[key], right[key])) return false;
+  }
+  return true;
+}
+
 function changedExit(
   kind: ExitKind,
   before: RangeIcebergExitInput | null,
@@ -274,7 +400,7 @@ function changedExit(
 ): Record<string, unknown> | null | undefined {
   const left = before ? editExitPayload(kind, before) : null;
   const right = after ? editExitPayload(kind, after) : null;
-  if (JSON.stringify(left) === JSON.stringify(right)) return undefined;
+  if (sameExit(left, right)) return undefined;
   return right;
 }
 

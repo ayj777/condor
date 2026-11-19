@@ -1,6 +1,6 @@
 import type { ExecutorInfo } from "@/lib/api";
 import { formatPriceSig } from "@/lib/formatters";
-import { executorTypeLabel } from "@/lib/executor-run";
+import { executorConfigEdit, executorTypeLabel } from "@/lib/executor-run";
 import { formatTokenAmount, sizeUnitSymbol } from "@/lib/order-size";
 
 export interface HoverOrder {
@@ -356,6 +356,9 @@ function executorWarnings(
   if (closeType === "POSITION_HOLD" && stopInPlace) {
     warnings.push({ title: "The exchange stop is still on MEXC.", detail: "" });
   }
+  const edit = executorConfigEdit(executor);
+  if (edit.error) warnings.push({ title: "Config edit failed", detail: edit.error });
+  if (edit.pending) warnings.push({ title: "Config edit pending", detail: edit.detail });
   return warnings;
 }
 

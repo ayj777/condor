@@ -538,6 +538,14 @@ export function TradeBottomPane({
                                       {childOrderIds(ex).length > 0 ? ` (${childOrderIds(ex).join(", ")})` : ""}
                                     </span>
                                   )}
+                                  {detail.configEditError && (
+                                    <span className="text-[9px] text-[var(--color-red)]" title={detail.configEditError}>
+                                      {detail.configEditError}
+                                    </span>
+                                  )}
+                                  {detail.configEditPending && (
+                                    <span className="text-[9px] text-[var(--color-text-muted)]">Edit pending</span>
+                                  )}
                                 </div>
                               );
                             })()}

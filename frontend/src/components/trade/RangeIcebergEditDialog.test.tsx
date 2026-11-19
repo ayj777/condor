@@ -126,7 +126,15 @@ describe("range iceberg edit dialog", () => {
     const submitted: Record<string, unknown>[] = [];
     render(
       <RangeIcebergEditDialog
-        executor={executor()}
+        executor={executor({
+          config: {
+            mode: "RANGE",
+            size_unit: "BASE",
+            total_amount: 100,
+            price_low: 0.07,
+            price_high: 0.09,
+          },
+        })}
         pending={false}
         error={null}
         onClose={() => {}}
@@ -137,6 +145,25 @@ describe("range iceberg edit dialog", () => {
     click("Save");
     expect(container.textContent).toContain("Total amount cannot be below the filled amount");
     expect(submitted).toEqual([]);
+  });
+
+  it("does not block a quote total when only the base fill is known", () => {
+    const submitted: Record<string, unknown>[] = [];
+    render(
+      <RangeIcebergEditDialog
+        executor={executor()}
+        pending={false}
+        error={null}
+        onClose={() => {}}
+        onSubmit={(body) => submitted.push(body)}
+      />,
+    );
+    expect(container.textContent).toContain("Total amount (USDT)");
+    expect(container.textContent).toContain("Filled 40 AIOT");
+    setInput("Total amount", "10");
+    click("Save");
+    expect(container.textContent).not.toContain("cannot be below the filled amount");
+    expect(submitted).toEqual([{ total_amount: 10 }]);
   });
 
   it("submits only the changed total", () => {
