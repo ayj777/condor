@@ -93,7 +93,7 @@ function exitDraft(state: OrderState, prefix: ExitPrefix): RangeIcebergExitInput
   };
 }
 
-function ExitEditor({
+export function ExitEditor({
   title,
   kind,
   prefix,
@@ -413,7 +413,7 @@ export function RangeIcebergFields({
         options={ARM_OPTIONS}
       />
       <p className="text-[10px] text-[var(--color-text-muted)]">
-        After full fill waits for the whole entry. On any fill can protect a partial fill.
+        After full fill waits for the whole entry. On any fill, a limit take profit rests and grows with fills. A market or iceberg take profit waits for its trigger price.
       </p>
       <ExitEditor
         title="Take profit"

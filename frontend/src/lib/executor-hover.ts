@@ -1,6 +1,6 @@
 import type { ExecutorInfo } from "@/lib/api";
 import { formatPriceSig } from "@/lib/formatters";
-import { executorTypeLabel } from "@/lib/executor-run";
+import { executorConfigEdit, executorTypeLabel } from "@/lib/executor-run";
 import { formatTokenAmount, sizeUnitSymbol } from "@/lib/order-size";
 
 export interface HoverOrder {
@@ -15,6 +15,11 @@ export interface HoverRow {
   value: string;
 }
 
+export interface ExecutorWarning {
+  title: string;
+  detail: string;
+}
+
 export interface ExecutorHoverModel {
   type: string;
   side: string;
@@ -24,6 +29,9 @@ export interface ExecutorHoverModel {
   orders: HoverOrder[];
   closeType: string;
   statusMessage: string;
+  warnings: ExecutorWarning[];
+  /** Applied edits that carry a note. Shown apart from the warning badges. */
+  notes: ExecutorWarning[];
 }
 
 const WORKING = new Set([
@@ -204,7 +212,7 @@ export function executorHoverModel(executor: ExecutorInfo, now = Date.now()): Ex
 
   const unit = sizeUnitSymbol(text(first(cfg, info, ["size_unit"])), executor.trading_pair);
   const total = num(pick(cfg, ["total_amount"]) ?? pick(info, ["target_amount"]) ?? pick(cfg, ["amount"]));
-  const filled = num(pick(info, ["filled_amount"]));
+  const filled = num(pick(info, ["filled_amount", "filled_base"]));
   const amountText = (amount: number) => (unit ? `${formatTokenAmount(amount)} ${unit}` : formatTokenAmount(amount));
   if (total != null && total > 0) {
     const pct = filled != null && filled >= 0 ? ` (${((filled / total) * 100).toFixed(1)}%)` : "";
@@ -271,7 +279,9 @@ export function executorHoverModel(executor: ExecutorInfo, now = Date.now()): Ex
   ]));
   if (avg != null && avg > 0) add("Avg fill", priceText(avg));
 
-  addExitRows(rows, info, executor.trading_pair);
+  const top = executor as unknown as Record<string, unknown>;
+  const stopInPlace = exchangeStopInPlace(info, top);
+  addExitRows(rows, info, executor.trading_pair, stopInPlace);
 
   if (started != null) add("Started", formatStartMyt(started));
 
@@ -287,7 +297,78 @@ export function executorHoverModel(executor: ExecutorInfo, now = Date.now()): Ex
     orders: hoverOrders(info),
     closeType: pretty(text(executor.close_type)),
     statusMessage,
+    warnings: executorWarnings(executor, info, top, stopInPlace),
+    notes: executorConfigNotes(executor),
   };
+}
+
+function owns(source: Record<string, unknown>, key: string): boolean {
+  if (!Object.prototype.hasOwnProperty.call(source, key)) return false;
+  const value = source[key];
+  if (typeof value === "boolean") return true;
+  return value != null && value !== "";
+}
+
+/** custom_info wins. The executor record is the fallback when the key is only there. */
+function lookup(info: Record<string, unknown>, top: Record<string, unknown>, key: string): unknown {
+  if (owns(info, key)) return info[key];
+  if (owns(top, key)) return top[key];
+  return undefined;
+}
+
+function flag(value: unknown): boolean | null {
+  if (value === true || value === "true" || value === 1 || value === "1") return true;
+  if (value === false || value === "false" || value === 0 || value === "0") return false;
+  return null;
+}
+
+function messageText(value: unknown): string {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    const row = value as Record<string, unknown>;
+    return text(row.message ?? row.error ?? row.detail);
+  }
+  return text(value);
+}
+
+/**
+ * `has_exchange_stop` decides when the executor sends it.
+ * Otherwise a stop order id still means the stop is in place, and an error means it is not.
+ */
+function exchangeStopInPlace(info: Record<string, unknown>, top: Record<string, unknown>): boolean {
+  const raw = lookup(info, top, "has_exchange_stop");
+  const parsed = flag(raw);
+  if (raw !== undefined && parsed != null) return parsed;
+  if (messageText(lookup(info, top, "exchange_stop_error"))) return false;
+  return text(lookup(info, top, "exchange_stop_order_id")) !== "";
+}
+
+function executorWarnings(
+  executor: ExecutorInfo,
+  info: Record<string, unknown>,
+  top: Record<string, unknown>,
+  stopInPlace: boolean,
+): ExecutorWarning[] {
+  const warnings: ExecutorWarning[] = [];
+  const stopError = messageText(lookup(info, top, "exchange_stop_error"));
+  if (stopError) warnings.push({ title: "Exchange stop is not placed", detail: stopError });
+  const resumeError = messageText(lookup(info, top, "resume_error"));
+  if (flag(lookup(info, top, "resume_failed")) === true || resumeError) {
+    warnings.push({ title: "Resume failed", detail: resumeError });
+  }
+  const closeType = stateToken(text(executor.close_type) || text(lookup(info, top, "close_type")));
+  if (closeType === "POSITION_HOLD" && stopInPlace) {
+    warnings.push({ title: "The exchange stop is still on MEXC.", detail: "" });
+  }
+  const edit = executorConfigEdit(executor);
+  if (edit.error) warnings.push({ title: "Config edit failed", detail: edit.error });
+  if (edit.pending) warnings.push({ title: "Config edit pending", detail: edit.detail });
+  return warnings;
+}
+
+function executorConfigNotes(executor: ExecutorInfo): ExecutorWarning[] {
+  const edit = executorConfigEdit(executor);
+  if (!edit.note) return [];
+  return [{ title: "Config edit", detail: edit.note }];
 }
 
 function quotePnl(value: number): string {
@@ -297,39 +378,94 @@ function quotePnl(value: number): string {
   return text;
 }
 
+const EXIT_STATE_LABELS: Record<string, string> = {
+  ARMED: "Armed",
+  RESTING: "TP resting",
+  TRIGGERED: "Triggered",
+  CLOSING: "Closing",
+  DONE: "Done",
+};
+
+function stateToken(value: unknown): string {
+  return text(value).replace(/^.*\./, "").replace(/[-.\s]/g, "_").toUpperCase();
+}
+
+function idCount(value: unknown): number {
+  if (Array.isArray(value)) return value.map((item) => text(item)).filter(Boolean).length;
+  return text(value) ? 1 : 0;
+}
+
 /**
  * Exit progress from a range iceberg `custom_info`.
  *
- * Idle with no trigger and no fill is left out, so an order that never armed
- * an exit does not grow a row of zeros.
+ * `exit_state` is the source of the status label when the executor sends it:
+ * a resting limit take profit stays "TP resting" instead of looking triggered.
+ * Older executors still use `exit_status` and `exit_active`. Idle with no
+ * trigger and no fill is left out, so an order that never armed an exit does
+ * not grow a row of zeros.
+ *
+ * Trigger prices are the executor's own numbers. A percent on the form is only
+ * an estimate from the limit or the range mid, so this card does not recompute one.
  */
-function addExitRows(rows: HoverRow[], info: Record<string, unknown>, pair: string) {
+function addExitRows(rows: HoverRow[], info: Record<string, unknown>, pair: string, exchangeStop: boolean) {
   const add = (label: string, value: string) => {
     if (value) rows.push({ label, value });
   };
   const tpTrigger = num(info.take_profit_trigger_price);
   const slTrigger = num(info.stop_loss_trigger_price);
-  const status = text(info.exit_status).toLowerCase();
+  const legacyStatus = text(info.exit_status).toLowerCase();
   const active = text(info.exit_active).toLowerCase();
-  const filled = num(info.exit_filled_amount);
+  const closed = num(pick(info, ["closed_base", "exit_filled_amount"]));
   const average = num(info.exit_average_price);
   const pnl = num(info.realized_pnl_quote);
+  const openBase = num(info.open_base);
+  const stateKey = stateToken(info.exit_state);
+  const hasExitState = stateKey !== "";
+  const stateLabel =
+    EXIT_STATE_LABELS[stateKey] ?? (hasExitState && stateKey !== "NONE" ? pretty(stateKey) : "");
+  const exitOrders = idCount(info.exit_order_ids);
+
   const hasTrigger = (tpTrigger != null && tpTrigger > 0) || (slTrigger != null && slTrigger > 0);
-  const hasFill = filled != null && filled > 0;
-  const moving = status !== "" && status !== "idle";
-  if (!hasTrigger && !hasFill && !moving && !active) return;
+  const hasFill = closed != null && closed > 0;
+  const hasOpen = openBase != null && openBase > 0;
+  const legacyMoving = legacyStatus !== "" && legacyStatus !== "idle";
+  const stateMoving = stateLabel !== "";
+  const flatDone = stateKey === "DONE" && openBase === 0;
+  const reported =
+    hasTrigger || hasFill || stateMoving || hasOpen || exchangeStop || exitOrders > 0 || flatDone;
+  if (hasExitState) {
+    if (!reported) return;
+  } else if (!reported && !legacyMoving && !active) {
+    return;
+  }
 
   const [base, quote] = (pair || "").split("-");
+  const amountText = (amount: number) => {
+    const formatted = formatTokenAmount(amount);
+    return base ? `${formatted} ${base}` : formatted;
+  };
+  // Prices the executor is using. A percent stays absent until a fill exists,
+  // because the executor measures it from the average fill. This card does not
+  // estimate one from the limit or the range mid.
   if (tpTrigger != null && tpTrigger > 0) add("TP trigger", priceText(tpTrigger));
   if (slTrigger != null && slTrigger > 0) add("SL trigger", priceText(slTrigger));
-  if (status && (status !== "idle" || hasTrigger || hasFill || active)) add("Exit status", pretty(status));
-  if (active) add("Exit", pretty(active));
-  if (filled != null && filled > 0) {
-    const amount = formatTokenAmount(filled);
-    add("Exit filled", base ? `${amount} ${base}` : amount);
+  if (hasExitState) {
+    if (stateLabel) add("Exit status", stateLabel);
+    const started = stateKey === "TRIGGERED" || stateKey === "CLOSING" || stateKey === "DONE";
+    if (started && active) add("Exit", pretty(active));
+  } else {
+    if (legacyStatus && (legacyStatus !== "idle" || hasTrigger || hasFill || active)) {
+      add("Exit status", pretty(legacyStatus));
+    }
+    if (active) add("Exit", pretty(active));
   }
+  if (hasOpen || (openBase === 0 && stateKey === "DONE")) add("Open", amountText(openBase ?? 0));
+  if (hasFill && closed != null) add("Exit filled", amountText(closed));
+  if (exchangeStop) add("Exchange stop", "In place");
+  if (exitOrders > 0) add("Exit orders", String(exitOrders));
   if (average != null && average > 0) add("Exit avg", priceText(average));
-  if (pnl != null && (hasFill || moving || active)) {
+  const showPnl = hasExitState ? hasFill || stateMoving || hasOpen || exchangeStop : hasFill || legacyMoving || active;
+  if (pnl != null && showPnl) {
     add("Realized PnL", quote ? `${quotePnl(pnl)} ${quote}` : quotePnl(pnl));
   }
 }

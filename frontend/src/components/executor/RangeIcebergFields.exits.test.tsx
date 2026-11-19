@@ -72,6 +72,9 @@ describe("range iceberg exits", () => {
     expect(checkbox("Take profit").checked).toBe(false);
     expect(checkbox("Stop loss").checked).toBe(false);
     expect(container.textContent).toContain("After full fill");
+    expect(container.textContent).toContain("a limit take profit rests and grows with fills");
+    expect(container.textContent).toContain("A market or iceberg take profit waits for its trigger price");
+    expect(container.textContent).not.toContain("protect a partial fill");
     expect(container.textContent).not.toContain("Percent");
     expect(container.textContent).not.toContain("A single stop loss sends a market order.");
   });
@@ -100,8 +103,8 @@ describe("range iceberg exits", () => {
       ri_sl_limit_price: 0.07,
     });
     const text = container.textContent ?? "";
-    expect(text).toContain("Long 0.0816, short 0.0784, from limit 0.08.");
-    expect(text).toContain("Long 0.0792, short 0.0808, from limit 0.08.");
+    expect(text).toContain("Estimate based on limit 0.08: long 0.0816, short 0.0784.");
+    expect(text).toContain("Estimate based on limit 0.08: long 0.0792, short 0.0808.");
     expect(container.querySelector('button[aria-label="Order type"]')).not.toBeNull();
     expect(container.querySelector('button[aria-label="Stop loss close"]')?.textContent).toContain("Iceberg");
     expect(text).toContain("Slices");

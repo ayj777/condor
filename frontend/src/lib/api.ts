@@ -7,6 +7,7 @@ import type {
 import { controllerKey } from "@/lib/controller-identity";
 import { collectCursorPages, type WalkOutcome } from "@/lib/history-pagination";
 
+import { apiErrorMessage } from "./api-error";
 import { authFetch, authHeaders } from "./auth-token";
 
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
@@ -21,9 +22,9 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
     // The status rides along on the Error so a caller can tell apart failures that
     // read the same as a message but call for different things from the operator —
     // a 501 from the API-settings routes means "this server is older than this
-    // panel, upgrade it", not "something is broken". `message` is unchanged, so
-    // every existing caller reads exactly what it read before.
-    throw Object.assign(new Error(err.detail || `Request failed: ${res.status}`), {
+    // panel, upgrade it", not "something is broken". A string detail stays the
+    // message. An object detail uses its reason, and a 422 list uses each field error.
+    throw Object.assign(new Error(apiErrorMessage(err, res.status)), {
       status: res.status,
       // The whole JSON body, for the few answers that carry more than a
       // sentence — a 409 on export/publish lists `possible_keys` (SEC review C2).
@@ -3541,6 +3542,16 @@ export const api = {
     apiFetch<{ status: string; result: unknown }>(
       `/api/v1/servers/${encodeURIComponent(server)}/executors/${encodeURIComponent(executorId)}/stop?keep_position=${keepPosition}`,
       { method: "POST" },
+    ),
+
+  patchRangeIceberg: (
+    server: string,
+    executorId: string,
+    body: Record<string, unknown>,
+  ) =>
+    apiFetch<{ accepted: boolean; reason: string; executor_id: string }>(
+      `/api/v1/servers/${encodeURIComponent(server)}/executors/${encodeURIComponent(executorId)}/range-iceberg`,
+      { method: "PATCH", body: JSON.stringify(body) },
     ),
 
   resumeExecutor: (server: string, executorId: string) =>

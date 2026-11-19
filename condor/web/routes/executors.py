@@ -452,6 +452,57 @@ async def create_executor_endpoint(
     return response
 
 
+@router.patch("/servers/{name}/executors/{executor_id}/range-iceberg")
+async def edit_range_iceberg_endpoint(
+    name: str,
+    executor_id: str,
+    body: dict,
+    user: WebUser = Depends(require_server_access),
+):
+    """Forward an in-place range iceberg edit.
+
+    The body is any subset of total_amount, price_low, price_high,
+    take_profit, and stop_loss. Null clears an exit. Unknown keys are left
+    in the body so the trading API can answer 422. A 409 detail object is
+    reduced to its reason. 404 and 422 keep their status.
+    """
+    from condor.fetchers.executors import describe_executor_error, update_range_iceberg
+    from condor.fetchers.raw_api import ApiRouteUnsupported
+
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=422, detail="Range iceberg edit body must be an object")
+
+    cm = get_config_manager()
+    client = await cm.get_client(name)
+    try:
+        result = await update_range_iceberg(client, executor_id, body)
+    except ApiRouteUnsupported:
+        raise HTTPException(
+            status_code=501,
+            detail="This trading API does not support editing a range iceberg",
+        )
+    except Exception as e:
+        status, message = describe_executor_error(e)
+        if status in (404, 409, 422):
+            logger.info(
+                "Range iceberg edit rejected for %s on '%s': HTTP %s",
+                executor_id,
+                name,
+                status,
+            )
+            raise HTTPException(status_code=status, detail=message)
+        logger.exception("Failed to edit range iceberg %s on '%s'", executor_id, name)
+        raise upstream_error("Failed to edit range iceberg", e)
+    record_ui_deed(
+        user,
+        verb="edit_range_iceberg",
+        summary=f"Edit range iceberg {executor_id[:12]}",
+    )
+    if isinstance(result, dict):
+        return result
+    return {"accepted": True, "reason": "", "executor_id": executor_id}
+
+
 @router.post("/servers/{name}/executors/{executor_id}/stop")
 async def stop_executor_endpoint(
     name: str,

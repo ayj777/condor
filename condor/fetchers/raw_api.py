@@ -71,8 +71,20 @@ async def detail(response) -> str:
         body = await response.json()
     except Exception:
         return f"the trading API returned HTTP {response.status}"
+    # Local import: executors imports this module from inside a function, and
+    # this helper is what turns a 409 object or a 422 list into one sentence.
+    from condor.fetchers.executors import api_error_text
+
+    # A string body is an error page, not a sentence. Only a JSON object or
+    # list can carry a detail, a reason, or a 422 field error.
+    if isinstance(body, (dict, list)):
+        text = api_error_text(body)
+        if text:
+            return text[:300]
+    # A plain message or error string is still the sentence. Object details
+    # are handled above, so this does not stringify a 409 reason object.
     if isinstance(body, dict):
-        for field in ("detail", "message", "error"):
+        for field in ("message", "error"):
             value = body.get(field)
             if isinstance(value, str) and value.strip():
                 return value.strip()[:300]
@@ -88,6 +100,7 @@ async def request(
     json: Optional[dict[str, Any]] = None,
     timeout: Optional[Any] = None,
     unsupported: type[Exception] = ApiRouteUnsupported,
+    missing_is_unsupported: bool = True,
 ) -> Any:
     """One raw authenticated request, with upstream's status preserved on failure.
 
@@ -102,6 +115,9 @@ async def request(
         unsupported: Exception class raised for a 404 or an unreachable client shape.
             Callers with their own capability exception pass it so their existing
             ``except`` clauses keep working.
+        missing_is_unsupported: When false, a 404 is a normal HTTP error. The
+            range iceberg edit uses that, because 404 means the executor is
+            missing rather than that the route is.
 
     Raises:
         unsupported: The route is not served here, or this client cannot reach it.
@@ -125,7 +141,7 @@ async def request(
     # existing caller and every test double already speaks.
     send = getattr(session, method.lower())
     async with send(f"{base_url}{path}", **kwargs) as response:
-        if response.status == 404:
+        if response.status == 404 and missing_is_unsupported:
             raise unsupported(f"{path} is not served by this API version")
         if not response.ok:
             raise aiohttp.ClientResponseError(

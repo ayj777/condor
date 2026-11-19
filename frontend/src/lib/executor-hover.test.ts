@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { ExecutorInfo } from "@/lib/api";
 import { executorHoverModel, formatStartMyt, placePopup } from "@/lib/executor-hover";
+import { executorRunDetail } from "@/lib/executor-run";
 
 function executor(patch: Partial<ExecutorInfo> = {}): ExecutorInfo {
   return {
@@ -212,6 +213,277 @@ describe("executor hover details", () => {
     );
     expect(model.rows.map((row) => row.label)).not.toContain("Exit status");
     expect(model.rows.map((row) => row.label)).not.toContain("Realized PnL");
+  });
+
+  it("labels a resting limit take profit without treating it as triggered", () => {
+    const model = executorHoverModel(
+      executor({
+        timestamp: 0,
+        pnl: 0,
+        config: { mode: "UP_TO", limit_price: 0.08, take_profit: { percent: "0.02" } },
+        custom_info: {
+          exit_state: "RESTING",
+          exit_status: "executing",
+          exit_active: "take_profit",
+          take_profit_trigger_price: "0.0825",
+          filled_amount: "12000",
+          filled_base: "12000",
+          open_base: "12000",
+          closed_base: "0",
+          exchange_stop_order_id: "exch-stop-44",
+          exit_order_ids: ["tp-a", "tp-b"],
+        },
+      }),
+    );
+    expect(model.rows.find((row) => row.label === "Exit status")?.value).toBe("TP resting");
+    expect(model.rows.find((row) => row.label === "Exit")).toBeUndefined();
+    expect(model.rows.map((row) => row.value)).not.toContain("Executing");
+    expect(model.rows.map((row) => row.value)).not.toContain("Take Profit");
+    // 2% of the 0.08 limit would be 0.0816. The card shows the executor price.
+    expect(model.rows.find((row) => row.label === "TP trigger")?.value).toBe("0.0825");
+    expect(model.rows.find((row) => row.label === "Open")?.value).toBe("12,000 AIOT");
+    expect(model.rows.find((row) => row.label === "Exchange stop")?.value).toBe("In place");
+    expect(model.rows.find((row) => row.label === "Exit orders")?.value).toBe("2");
+    const dumped = JSON.stringify(model);
+    expect(dumped).not.toContain("exch-stop-44");
+    expect(dumped).not.toContain("tp-a");
+    expect(dumped).not.toContain("0.0816");
+  });
+
+  it("uses distinct exit_state labels and names the exit only after it starts", () => {
+    const cases = [
+      ["ARMED", "Armed", false],
+      ["TRIGGERED", "Triggered", true],
+      ["CLOSING", "Closing", true],
+      ["DONE", "Done", true],
+    ] as const;
+    for (const [state, label, showKind] of cases) {
+      const model = executorHoverModel(
+        executor({
+          timestamp: 0,
+          pnl: 0,
+          custom_info: {
+            exit_state: state,
+            exit_status: "executing",
+            exit_active: "take_profit",
+            open_base: state === "DONE" ? "0" : "4",
+          },
+        }),
+      );
+      expect(model.rows.find((row) => row.label === "Exit status")?.value).toBe(label);
+      expect(model.rows.find((row) => row.label === "Exit")?.value).toBe(
+        showKind ? "Take Profit" : undefined,
+      );
+      expect(model.rows.map((row) => row.value)).not.toContain("Executing");
+    }
+  });
+
+  it("ignores a stale executing status when exit_state is none", () => {
+    const model = executorHoverModel(
+      executor({
+        timestamp: 0,
+        pnl: 0,
+        custom_info: {
+          exit_state: "NONE",
+          exit_status: "executing",
+          exit_active: "take_profit",
+        },
+      }),
+    );
+    expect(model.rows.map((row) => row.label)).not.toContain("Exit status");
+    expect(model.rows.map((row) => row.label)).not.toContain("Exit");
+  });
+
+  it("does not invent a trigger from the limit when the executor has not sent one", () => {
+    const model = executorHoverModel(
+      executor({
+        timestamp: 0,
+        pnl: 0,
+        config: {
+          mode: "UP_TO",
+          limit_price: 0.08,
+          take_profit: { percent: "0.02", execution: "SINGLE", order_type: "LIMIT" },
+        },
+        custom_info: {
+          exit_state: "ARMED",
+          filled_base: "100",
+          open_base: "100",
+        },
+      }),
+    );
+    expect(model.rows.find((row) => row.label === "Exit status")?.value).toBe("Armed");
+    expect(model.rows.find((row) => row.label === "TP trigger")).toBeUndefined();
+    expect(model.rows.find((row) => row.label === "Open")?.value).toBe("100 AIOT");
+    expect(JSON.stringify(model)).not.toContain("0.0816");
+  });
+
+  it("reads filled_base when filled_amount is absent and prefers closed_base", () => {
+    const sized = executorHoverModel(
+      executor({
+        timestamp: 0,
+        pnl: 0,
+        config: { total_amount: 1000, size_unit: "BASE" },
+        custom_info: { filled_base: "250" },
+      }),
+    );
+    expect(sized.rows.find((row) => row.label === "Size")?.value).toBe("1,000 AIOT, 250 filled (25.0%)");
+
+    const closing = executorHoverModel(
+      executor({
+        timestamp: 0,
+        pnl: 0,
+        custom_info: {
+          exit_state: "CLOSING",
+          exit_active: "stop_loss",
+          closed_base: "40",
+          exit_filled_amount: "10",
+          open_base: "60",
+        },
+      }),
+    );
+    expect(closing.rows.find((row) => row.label === "Exit filled")?.value).toBe("40 AIOT");
+    expect(closing.rows.find((row) => row.label === "Exit status")?.value).toBe("Closing");
+    expect(closing.rows.find((row) => row.label === "Exit")?.value).toBe("Stop Loss");
+    expect(closing.rows.find((row) => row.label === "Open")?.value).toBe("60 AIOT");
+  });
+
+  it("warns when the exchange stop was not placed, and prefers has_exchange_stop", () => {
+    const failed = executorHoverModel(
+      executor({
+        timestamp: 0,
+        pnl: 0,
+        custom_info: {
+          exchange_stop_error: "MEXC rejected the stop: insufficient margin",
+          exchange_stop_order_id: "stop-should-not-show",
+        },
+      }),
+    );
+    expect(failed.warnings).toEqual([
+      { title: "Exchange stop is not placed", detail: "MEXC rejected the stop: insufficient margin" },
+    ]);
+    expect(failed.rows.find((row) => row.label === "Exchange stop")).toBeUndefined();
+    expect(JSON.stringify(failed)).not.toContain("stop-should-not-show");
+
+    const flagged = executorHoverModel(
+      executor({
+        timestamp: 0,
+        pnl: 0,
+        custom_info: { has_exchange_stop: true },
+      }),
+    );
+    expect(flagged.rows.find((row) => row.label === "Exchange stop")?.value).toBe("In place");
+    expect(flagged.warnings).toEqual([]);
+
+    const cleared = executorHoverModel(
+      executor({
+        timestamp: 0,
+        pnl: 0,
+        custom_info: { has_exchange_stop: false, exchange_stop_order_id: "still-there" },
+      }),
+    );
+    expect(cleared.rows.find((row) => row.label === "Exchange stop")).toBeUndefined();
+    expect(JSON.stringify(cleared)).not.toContain("still-there");
+  });
+
+  it("reads a resume failure and a live stop on a position hold from custom_info or the record", () => {
+    const resumed = executorHoverModel(
+      executor({
+        timestamp: 0,
+        pnl: 0,
+        custom_info: { resume_failed: true, resume_error: "connector offline" },
+      }),
+    );
+    expect(resumed.warnings).toEqual([{ title: "Resume failed", detail: "connector offline" }]);
+
+    const held = executorHoverModel(
+      executor({
+        timestamp: 0,
+        pnl: 0,
+        close_type: "POSITION_HOLD",
+        custom_info: { has_exchange_stop: "true" },
+      }),
+    );
+    expect(held.rows.find((row) => row.label === "Exchange stop")?.value).toBe("In place");
+    expect(held.warnings).toEqual([{ title: "The exchange stop is still on MEXC.", detail: "" }]);
+
+    const fromRecord = executorHoverModel({
+      ...executor({ timestamp: 0, pnl: 0, close_type: "position_hold", custom_info: {} }),
+      has_exchange_stop: true,
+      resume_failed: true,
+      resume_error: "state restore failed",
+    } as ExecutorInfo);
+    expect(fromRecord.rows.find((row) => row.label === "Exchange stop")?.value).toBe("In place");
+    expect(fromRecord.warnings).toEqual([
+      { title: "Resume failed", detail: "state restore failed" },
+      { title: "The exchange stop is still on MEXC.", detail: "" },
+    ]);
+
+    const flat = executorHoverModel(
+      executor({
+        timestamp: 0,
+        pnl: 0,
+        close_type: "POSITION_HOLD",
+        custom_info: { has_exchange_stop: false },
+      }),
+    );
+    expect(flat.warnings).toEqual([]);
+    expect(flat.rows.find((row) => row.label === "Exchange stop")).toBeUndefined();
+  });
+
+  it("shows a pending config edit and a config edit error when the executor sends them", () => {
+    const pending = executorHoverModel(
+      executor({
+        timestamp: 0,
+        pnl: 0,
+        custom_info: { pending_config_edit: { total_amount: "150", stop_loss: null } },
+      }),
+    );
+    expect(pending.warnings).toEqual([
+      { title: "Config edit pending", detail: "total_amount, stop_loss" },
+    ]);
+
+    const failed = executorHoverModel(
+      executor({
+        timestamp: 0,
+        pnl: 0,
+        custom_info: { config_edit_error: "cannot shrink total_amount below the filled amount" },
+      }),
+    );
+    expect(failed.warnings).toEqual([
+      {
+        title: "Config edit failed",
+        detail: "cannot shrink total_amount below the filled amount",
+      },
+    ]);
+
+    const quiet = executorHoverModel(executor({ timestamp: 0, pnl: 0, custom_info: {} }));
+    expect(quiet.warnings).toEqual([]);
+    expect(quiet.notes).toEqual([]);
+  });
+
+  it("shows a config edit note as info, beside a failure when both are present", () => {
+    const noted = executor({
+      timestamp: 0,
+      pnl: 0,
+      custom_info: {
+        config_edit_note: "total amount was clamped to the filled amount",
+        config_edit_error: "stop loss was not applied",
+        pending_config_edit: true,
+      },
+    });
+    const model = executorHoverModel(noted);
+    expect(model.notes).toEqual([
+      { title: "Config edit", detail: "total amount was clamped to the filled amount" },
+    ]);
+    expect(model.warnings).toEqual([
+      { title: "Config edit failed", detail: "stop loss was not applied" },
+      { title: "Config edit pending", detail: "" },
+    ]);
+    expect(executorRunDetail(noted)).toMatchObject({
+      configEditNote: "total amount was clamped to the filled amount",
+      configEditError: "stop loss was not applied",
+      configEditPending: true,
+    });
   });
 });
 

@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChevronUp, ChevronDown, Loader2, Play, Square, Trash2, Wallet, Clock, ArrowUpDown, ArrowUp, ArrowDown } from "lucide-react";
 
 import { api, type ExecutorInfo, type ConsolidatedPosition } from "@/lib/api";
+import { apiErrorMessage, editAcceptedMessage } from "@/lib/api-error";
 import { useServer } from "@/hooks/useServer";
 import { usePairBalances } from "@/hooks/usePairBalances";
 import { useRates } from "@/hooks/useRates";
@@ -17,6 +18,9 @@ import {
 import { childOrderIds, executorRunDetail, executorTypeLabel } from "@/lib/executor-run";
 import { ExecutorHoverRow } from "@/components/trade/ExecutorDetailPopup";
 import { stopKeepCopy } from "@/lib/executorStopCopy";
+import { rangeIcebergEditable } from "@/lib/range-iceberg-edit";
+import { RangeIcebergEditDialog } from "@/components/trade/RangeIcebergEditDialog";
+import { SuccessToast } from "@/components/executor/ExecutorSuccessModal";
 import { defaultKeepPosition, executorBookSide } from "@/lib/trade-guards";
 import { executorsQuery } from "@/lib/queryClient";
 import { TRADE_BOTTOM_PANE_KEY } from "@/lib/sessionState";
@@ -180,6 +184,38 @@ export function TradeBottomPane({
       queryClient.invalidateQueries({ queryKey: executorsQuery(server).prefix });
       queryClient.invalidateQueries({ queryKey: ["dex-lp-executors", server] });
       queryClient.invalidateQueries({ queryKey: ["executors-infinite", server] });
+    },
+  });
+
+  const [editId, setEditId] = useState<string | null>(null);
+  const [editError, setEditError] = useState<string | null>(null);
+  const [editSuccess, setEditSuccess] = useState<string | null>(null);
+  const editTarget = executors.find((ex) => ex.id === editId) ?? null;
+  useEffect(() => {
+    if (!editSuccess) return;
+    const timer = window.setTimeout(() => setEditSuccess(null), 4000);
+    return () => window.clearTimeout(timer);
+  }, [editSuccess]);
+  const editMutation = useMutation({
+    mutationFn: ({ id, body }: { id: string; body: Record<string, unknown> }) =>
+      api.patchRangeIceberg(server!, id, body),
+    onSuccess: (result) => {
+      if (result.accepted === false) {
+        const reason = typeof result.reason === "string" ? result.reason.trim() : "";
+        setEditError(reason || "The range iceberg was not updated");
+        return;
+      }
+      setEditId(null);
+      setEditError(null);
+      setEditSuccess(editAcceptedMessage(result.reason));
+      queryClient.invalidateQueries({ queryKey: executorsQuery(server).prefix });
+      queryClient.invalidateQueries({ queryKey: ["dex-lp-executors", server] });
+      queryClient.invalidateQueries({ queryKey: ["executors-infinite", server] });
+    },
+    onError: (error: Error) => {
+      const body = (error as { body?: unknown }).body;
+      const status = (error as { status?: number }).status ?? 0;
+      setEditError(body ? apiErrorMessage(body, status) : error.message);
     },
   });
 
@@ -502,6 +538,19 @@ export function TradeBottomPane({
                                       {childOrderIds(ex).length > 0 ? ` (${childOrderIds(ex).join(", ")})` : ""}
                                     </span>
                                   )}
+                                  {detail.configEditError && (
+                                    <span className="text-[9px] text-[var(--color-red)]" title={detail.configEditError}>
+                                      {detail.configEditError}
+                                    </span>
+                                  )}
+                                  {detail.configEditPending && (
+                                    <span className="text-[9px] text-[var(--color-text-muted)]">Edit pending</span>
+                                  )}
+                                  {detail.configEditNote && (
+                                    <span className="text-[9px] text-[var(--color-primary)]" title={detail.configEditNote}>
+                                      {detail.configEditNote}
+                                    </span>
+                                  )}
                                 </div>
                               );
                             })()}
@@ -533,7 +582,21 @@ export function TradeBottomPane({
                               {formatAge(ex.timestamp)}
                             </span>
                           </td>
-                          <td className="px-2 py-1.5 text-center" onClick={(e) => e.stopPropagation()}>
+                          <td className="px-2 py-1.5 text-center whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
+                            {rangeIcebergEditable(ex) && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setEditError(null);
+                                  setEditSuccess(null);
+                                  setEditId(ex.id);
+                                }}
+                                className="rounded px-1 py-0.5 text-[10px] font-medium text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-primary)]/20 hover:text-[var(--color-primary)]"
+                                title="Edit range iceberg"
+                              >
+                                Edit
+                              </button>
+                            )}
                             {active && resumeSupport.data?.supported === true && executorRunDetail(ex).canResume && (
                               <button
                                 onClick={() => setConfirmResumeId(ex.id)}
@@ -708,6 +771,24 @@ export function TradeBottomPane({
             )}
           </div>
         </div>
+      )}
+
+      {editSuccess && <SuccessToast message={editSuccess} />}
+      {editTarget && (
+        <RangeIcebergEditDialog
+          key={editTarget.id}
+          executor={editTarget}
+          pending={editMutation.isPending}
+          error={editError}
+          onClose={() => {
+            setEditId(null);
+            setEditError(null);
+          }}
+          onSubmit={(body) => {
+            setEditError(null);
+            editMutation.mutate({ id: editTarget.id, body });
+          }}
+        />
       )}
 
       {confirmResumeId && (

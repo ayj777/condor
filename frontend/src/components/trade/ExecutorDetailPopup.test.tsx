@@ -103,4 +103,83 @@ describe("executor row focus", () => {
     });
     expect(card()).toBeNull();
   });
+
+  it("shows a warning badge when the exchange stop or resume failed, and notes a live MEXC stop", () => {
+    act(() => {
+      root.render(
+        <table>
+          <tbody>
+            <ExecutorHoverRow
+              executor={{
+                ...executor,
+                id: "ri-warn",
+                close_type: "POSITION_HOLD",
+                custom_info: {
+                  has_exchange_stop: true,
+                  exchange_stop_error: "reduce only was rejected",
+                  resume_failed: true,
+                  resume_error: "could not restore the ladder",
+                  exchange_stop_order_id: "hidden-stop",
+                },
+              }}
+            >
+              <td>AIOT</td>
+            </ExecutorHoverRow>
+          </tbody>
+        </table>,
+      );
+    });
+    const warned = container.querySelector("tr");
+    act(() => {
+      warned?.focus();
+    });
+    const open = document.querySelector("[data-executor-detail='ri-warn']");
+    expect(open?.textContent).toContain("Exchange stop is not placed");
+    expect(open?.textContent).toContain("reduce only was rejected");
+    expect(open?.textContent).toContain("Resume failed");
+    expect(open?.textContent).toContain("could not restore the ladder");
+    expect(open?.textContent).toContain("The exchange stop is still on MEXC.");
+    expect(open?.textContent).toContain("In place");
+    expect(open?.textContent).not.toContain("hidden-stop");
+    const badge = open?.querySelector("[role='status']");
+    expect(badge?.className).toContain("color-yellow");
+  });
+
+  it("shows a config edit note as info, not as a warning", () => {
+    act(() => {
+      root.render(
+        <table>
+          <tbody>
+            <ExecutorHoverRow
+              executor={{
+                ...executor,
+                id: "ri-note",
+                custom_info: {
+                  config_edit_note: "cancels still pending",
+                  config_edit_error: "take profit was not applied",
+                },
+              }}
+            >
+              <td>AIOT</td>
+            </ExecutorHoverRow>
+          </tbody>
+        </table>,
+      );
+    });
+    act(() => {
+      container.querySelector("tr")?.focus();
+    });
+    const open = document.querySelector("[data-executor-detail='ri-note']");
+    const note = [...(open?.querySelectorAll("p") ?? [])].find((el) =>
+      el.textContent?.includes("cancels still pending"),
+    );
+    const failure = [...(open?.querySelectorAll("p") ?? [])].find((el) =>
+      el.textContent?.includes("take profit was not applied"),
+    );
+    expect(note?.textContent).toContain("Config edit");
+    expect(note?.className).toContain("color-primary");
+    expect(note?.className).not.toContain("color-yellow");
+    expect(note?.className).not.toContain("color-red");
+    expect(failure?.className).toContain("color-yellow");
+  });
 });

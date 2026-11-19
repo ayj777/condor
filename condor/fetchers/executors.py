@@ -1,6 +1,8 @@
 """Fetch and manage executors via Hummingbot API."""
 
+import ast
 import asyncio
+import json
 import logging
 import re
 import time
@@ -659,6 +661,98 @@ async def fetch_all_executors(
     return rows
 
 
+_ALREADY_OPEN_SIDE = re.compile(
+    r"(A range iceberg is already open on \S+ )(BUY|SELL)( for\b)",
+    re.IGNORECASE,
+)
+
+
+def position_side_notice(message: str) -> str:
+    """Say long or short in the one-open range iceberg refusal.
+
+    The trading API names that slot BUY or SELL. The trade page speaks long
+    and short for the same two sides.
+    """
+
+    def repl(match: re.Match[str]) -> str:
+        word = "SHORT" if match.group(2).upper() == "SELL" else "LONG"
+        return f"{match.group(1)}{word}{match.group(3)}"
+
+    return _ALREADY_OPEN_SIDE.sub(repl, message or "")
+
+
+def _parse_embedded(text: str) -> Any:
+    """A dict or list embedded in an error string, or None.
+
+    The trading client sometimes stringifies a JSON object and sometimes a
+    Python repr. Either can carry the range-iceberg rejection.
+    """
+    for opener in ("{", "["):
+        start = text.find(opener)
+        if start < 0:
+            continue
+        chunk = text[start:].strip().rstrip(".")
+        for loader in (json.loads, ast.literal_eval):
+            try:
+                parsed = loader(chunk)
+            except (ValueError, SyntaxError, MemoryError, RecursionError):
+                continue
+            if isinstance(parsed, (dict, list)):
+                return parsed
+    return None
+
+
+def _structured_error_text(message: Any) -> Optional[str]:
+    """The reason inside an object or list detail, or None when it is plain text."""
+    if isinstance(message, dict):
+        reason = message.get("reason")
+        if isinstance(reason, str) and reason.strip():
+            return reason.strip()
+        msg = message.get("msg")
+        if isinstance(msg, str) and msg.strip():
+            loc = message.get("loc")
+            if isinstance(loc, (list, tuple)):
+                where = ".".join(
+                    str(part) for part in loc if str(part) not in {"body", ""}
+                )
+                if where:
+                    return f"{where}: {msg.strip()}"
+            return msg.strip()
+        nested = message.get("detail")
+        if isinstance(nested, str) and nested.strip():
+            return nested.strip()
+        if nested is not None and nested is not message:
+            return _structured_error_text(nested)
+        return None
+    if isinstance(message, list):
+        parts = []
+        for item in message:
+            text = _structured_error_text(item)
+            if text:
+                parts.append(text)
+        return "; ".join(parts) if parts else None
+    if isinstance(message, str):
+        parsed = _parse_embedded(message)
+        if isinstance(parsed, (dict, list)):
+            return _structured_error_text(parsed)
+    return None
+
+
+def api_error_text(message: Any) -> str:
+    """User-facing text for a trading API error body or ``detail`` value.
+
+    A 409 from a range iceberg edit is ``{"accepted": false, "reason": ...}``.
+    A 422 is a list of ``msg`` entries. A string detail is returned unchanged,
+    apart from the one-open iceberg sentence, which says long or short.
+    """
+    extracted = _structured_error_text(message)
+    if extracted:
+        return position_side_notice(extracted)
+    if isinstance(message, str) and message.strip():
+        return position_side_notice(message.strip())
+    return ""
+
+
 def describe_executor_error(
     exc: BaseException, connector: str = ""
 ) -> tuple[Optional[int], str]:
@@ -680,10 +774,23 @@ def describe_executor_error(
     status = getattr(exc, "status", None)
     if isinstance(status, int):
         message = getattr(exc, "message", None)
-        if isinstance(message, (dict, list)):
-            message = str(message)
-        if isinstance(message, str) and message.strip():
-            return status, clarify_exchange_error(message.strip(), connector)
+        # A range iceberg rejection puts the reason on an object. A 422 puts a
+        # list of field errors there. Both arrive as the object itself or as
+        # the client's string of it.
+        text = api_error_text(message)
+        # An exchange payload is ``code`` plus ``message``, which the clarifier
+        # reads from the string form. A range iceberg object already yielded
+        # its reason above, so it must not be stringified whole.
+        if (
+            not text
+            and isinstance(message, dict)
+            and "reason" not in message
+            and "detail" not in message
+            and "msg" not in message
+        ):
+            text = str(message)
+        if text:
+            return status, clarify_exchange_error(text, connector)
         return status, f"the trading API returned HTTP {status}"
     if isinstance(exc, (aiohttp.ClientError, asyncio.TimeoutError, OSError)):
         return None, "the trading API is unreachable"
@@ -740,6 +847,29 @@ async def create_executor(
     except Exception as e:
         logger.error("Error creating executor: %s", e, exc_info=True)
         raise
+
+
+async def update_range_iceberg(
+    client, executor_id: str, body: Dict[str, Any]
+) -> Dict[str, Any]:
+    """PATCH a live range iceberg. Raises on failure, including 404 and 409.
+
+    The body is forwarded as given. Omitted keys stay unchanged upstream, and
+    an explicit null clears an exit. Unknown keys are the trading API's 422.
+    """
+    from urllib.parse import quote
+
+    from condor.fetchers.raw_api import request as raw_request
+
+    path = f"/executors/{quote(str(executor_id), safe='')}/range-iceberg"
+    # A 404 here is "not that executor", not "this API has no such route".
+    return await raw_request(
+        client,
+        "patch",
+        path,
+        json=body,
+        missing_is_unsupported=False,
+    )
 
 
 async def stop_executor(

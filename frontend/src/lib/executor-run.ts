@@ -40,11 +40,70 @@ export function displayedExecutorType(ex: ExecutorInfo): string {
   return ex.type || "—";
 }
 
+function editText(value: unknown): string {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    const row = value as Record<string, unknown>;
+    return editText(row.message ?? row.error ?? row.detail ?? row.reason);
+  }
+  if (value == null) return "";
+  const text = String(value).trim();
+  if (!text || text === "null" || text === "undefined" || text === "None") return "";
+  return text;
+}
+
+function editField(ex: ExecutorInfo, key: string): unknown {
+  const info = ex.custom_info;
+  if (info && Object.prototype.hasOwnProperty.call(info, key)) return info[key];
+  const top = ex as unknown as Record<string, unknown>;
+  if (Object.prototype.hasOwnProperty.call(top, key)) return top[key];
+  return undefined;
+}
+
+/**
+ * A queued in-place edit, a note about one that applied, and a failure.
+ *
+ * Absent fields stay quiet. `pending_config_edit` may be a flag or the
+ * change object. `config_edit_note` is an applied edit with a caveat.
+ * `config_edit_error` means the edit was not applied.
+ */
+export function executorConfigEdit(ex: ExecutorInfo | null | undefined): {
+  pending: boolean;
+  detail: string;
+  error: string;
+  note: string;
+} {
+  if (!ex) return { pending: false, detail: "", error: "", note: "" };
+  const error = editText(editField(ex, "config_edit_error"));
+  const note = editText(editField(ex, "config_edit_note"));
+  const pendingRaw = editField(ex, "pending_config_edit");
+  let pending = false;
+  let detail = "";
+  if (pendingRaw === true || pendingRaw === "true" || pendingRaw === 1 || pendingRaw === "1") {
+    pending = true;
+  } else if (typeof pendingRaw === "string") {
+    const text = pendingRaw.trim();
+    if (text && text !== "false" && text !== "0") {
+      pending = true;
+      detail = text;
+    }
+  } else if (pendingRaw && typeof pendingRaw === "object" && !Array.isArray(pendingRaw)) {
+    const keys = Object.keys(pendingRaw as Record<string, unknown>);
+    if (keys.length) {
+      pending = true;
+      detail = keys.join(", ");
+    }
+  }
+  return { pending, detail, error, note };
+}
+
 /** Filled size, halt reason, and whether resume is meaningful for this row. */
 export function executorRunDetail(ex: ExecutorInfo): {
   filled: string | null;
   halt: string | null;
   canResume: boolean;
+  configEditPending: boolean;
+  configEditError: string | null;
+  configEditNote: string | null;
 } {
   const info = ex.custom_info || {};
   const filled = Number(info.filled_amount);
@@ -59,7 +118,15 @@ export function executorRunDetail(ex: ExecutorInfo): {
   const reason = typeof info.status_reason === "string" ? info.status_reason : "";
   const halt = halted ? reason || "unknown_order_halt" : null;
   const paused = info.paused === true || halted;
-  return { filled: filledText, halt, canResume: paused && isExecutorActive(ex.status) };
+  const edit = executorConfigEdit(ex);
+  return {
+    filled: filledText,
+    halt,
+    canResume: paused && isExecutorActive(ex.status),
+    configEditPending: edit.pending,
+    configEditError: edit.error || null,
+    configEditNote: edit.note || null,
+  };
 }
 
 /** Resting child order ids, shown next to a halt. */

@@ -115,3 +115,12 @@ export function ErrorToast({ message }: { message: string }) {
     </div>
   );
 }
+
+/** Bottom-right confirmation after an accepted executor edit. */
+export function SuccessToast({ message }: { message: string }) {
+  return (
+    <div className="absolute bottom-16 right-4 rounded-lg border border-[var(--color-green)]/30 bg-[var(--color-green)]/10 px-4 py-2 text-sm text-[var(--color-green)]">
+      {message}
+    </div>
+  );
+}
