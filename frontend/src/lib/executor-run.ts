@@ -198,6 +198,21 @@ export function executorBaseSizeNote(ex: ExecutorInfo, mark?: number | null): st
   return approximateQuoteLabel(filled, price, pairTokens(ex.trading_pair).quote);
 }
 
+/**
+ * A shallower iceberg whose entries are held while a deeper tier is the one
+ * the price qualifies for. Exits keep working. This is not an order halt.
+ */
+export function entryPause(source: {
+  custom_info?: Record<string, unknown> | null;
+}): { paused: boolean; reason: string } {
+  const info = source.custom_info ?? {};
+  const raw = info.entry_paused;
+  const paused = raw === true || raw === "true" || raw === 1 || raw === "1";
+  if (!paused) return { paused: false, reason: "" };
+  const reason = typeof info.pause_reason === "string" ? info.pause_reason.trim() : "";
+  return { paused: true, reason };
+}
+
 /** Filled size, halt reason, and whether resume is meaningful for this row. */
 export function executorRunDetail(ex: ExecutorInfo): {
   filled: string | null;

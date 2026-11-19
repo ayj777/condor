@@ -1,6 +1,6 @@
 import type { ExecutorInfo } from "@/lib/api";
 import { formatPriceSig } from "@/lib/formatters";
-import { executorConfigEdit, executorTypeLabel, rangeIcebergTierFacts } from "@/lib/executor-run";
+import { entryPause, executorConfigEdit, executorTypeLabel, rangeIcebergTierFacts } from "@/lib/executor-run";
 import {
   approximateQuoteLabel,
   formatTokenAmount,
@@ -40,6 +40,9 @@ export interface ExecutorHoverModel {
   warnings: ExecutorWarning[];
   /** Applied edits that carry a note. Shown apart from the warning badges. */
   notes: ExecutorWarning[];
+  /** Entries are held for a deeper tier. Take profit and stop loss still run. */
+  entryPaused: boolean;
+  pauseReason: string;
 }
 
 const WORKING = new Set([
@@ -317,6 +320,11 @@ export function executorHoverModel(
   if (avg != null && avg > 0) add("Avg fill", priceText(avg));
 
   const top = executor as unknown as Record<string, unknown>;
+  const pause = entryPause(executor);
+  if (pause.paused) {
+    add("Paused", pause.reason || "entry paused");
+    add("Exits", "TP and SL active");
+  }
   if (rangeIceberg) {
     for (const fact of rangeIcebergTierFacts(executor)) {
       if (fact.label === "Group" || fact.label === "Sibling base") add(fact.label, fact.value);
@@ -342,6 +350,8 @@ export function executorHoverModel(
     statusMessage,
     warnings: executorWarnings(executor, info, top, stopInPlace),
     notes: executorConfigNotes(executor),
+    entryPaused: pause.paused,
+    pauseReason: pause.reason,
   };
 }
 

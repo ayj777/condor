@@ -15,7 +15,7 @@ import { PairLabel } from "@/components/executor/PairLabel";
 import { ExecutorHoverRow } from "@/components/trade/ExecutorDetailPopup";
 import { useResizeDrag } from "@/hooks/useResizeDrag";
 import { type ExecutorInfo } from "@/lib/api";
-import { displayedExecutorType, rangeIcebergTierLine } from "@/lib/executor-run";
+import { displayedExecutorType, entryPause, rangeIcebergTierLine } from "@/lib/executor-run";
 import {
   formatUsd,
   formatVolume,
@@ -155,6 +155,7 @@ const ExecutorRow = memo(function ExecutorRow({
   const side = ex.side.toUpperCase();
   const pnlBorder = ex.pnl >= 0 ? "var(--color-green)" : "var(--color-red)";
   const quote = ex.trading_pair?.split("-")[1] || "USDT";
+  const pause = entryPause(ex);
   return (
     <ExecutorHoverRow
       executor={ex}
@@ -182,6 +183,17 @@ const ExecutorRow = memo(function ExecutorRow({
         {rangeIcebergTierLine(ex) && (
           <div className="mt-0.5 max-w-[16rem] font-mono text-[10px] leading-snug text-[var(--color-text-muted)]">
             {rangeIcebergTierLine(ex)}
+          </div>
+        )}
+        {pause.paused && (
+          <div className="mt-0.5 flex flex-col gap-0.5">
+            <span className="w-fit rounded-full bg-[var(--color-yellow)]/15 px-1.5 py-0.5 text-[10px] font-bold uppercase text-[var(--color-yellow)]">
+              Paused
+            </span>
+            {pause.reason && (
+              <span className="text-[10px] text-[var(--color-text-muted)]">{pause.reason}</span>
+            )}
+            <span className="text-[10px] text-[var(--color-green)]">TP and SL active</span>
           </div>
         )}
       </td>
@@ -448,6 +460,7 @@ export function DetailPanel({
   })();
 
   const quote = executor.trading_pair?.split("-")[1] || "USDT";
+  const pause = entryPause(executor);
   const fmtPnl = rateFormatPnl ? (v: number) => rateFormatPnl(v, quote) : formatPnl;
   const fmtVal = rateFormatValue ? (v: number) => rateFormatValue(v, quote) : formatUsd;
   const fmtDet = rateFormatDetailed ? (v: number) => rateFormatDetailed(v, quote) : formatUsd;
@@ -509,6 +522,14 @@ export function DetailPanel({
               <span className="font-mono text-xs text-[var(--color-text-muted)]">
                 {rangeIcebergTierLine(executor)}
               </span>
+            )}
+            {pause.paused && (
+              <>
+                <span className="rounded-full bg-[var(--color-yellow)]/15 px-2 py-0.5 text-xs font-bold uppercase text-[var(--color-yellow)]">
+                  Paused{pause.reason ? `: ${pause.reason}` : ""}
+                </span>
+                <span className="text-xs text-[var(--color-green)]">TP and SL active</span>
+              </>
             )}
             <span className="text-[var(--color-text-muted)]">{executor.connector}</span>
             <PairLabel tradingPair={executor.trading_pair} connector={executor.connector} />

@@ -15,7 +15,7 @@ import {
   pnlTextClass,
   isExecutorActive,
 } from "@/lib/formatters";
-import { childOrderIds, executorBaseSizeNote, executorRunDetail, executorTypeLabel, rangeIcebergTierLine } from "@/lib/executor-run";
+import { childOrderIds, entryPause, executorBaseSizeNote, executorRunDetail, executorTypeLabel, rangeIcebergTierLine } from "@/lib/executor-run";
 import { ExecutorHoverRow } from "@/components/trade/ExecutorDetailPopup";
 import { stopKeepCopy } from "@/lib/executorStopCopy";
 import { rangeIcebergEditable } from "@/lib/range-iceberg-edit";
@@ -482,6 +482,7 @@ export function TradeBottomPane({
                       const exit = getExitPrice(ex);
                       const closeLabel = ex.close_type ? ex.close_type.replace(/_/g, " ") : "";
                       const tierLine = rangeIcebergTierLine(ex);
+                      const pause = entryPause(ex);
                       return (
                         <ExecutorHoverRow
                           key={ex.id}
@@ -528,7 +529,11 @@ export function TradeBottomPane({
                               const sizeNote = executorBaseSizeNote(ex, markPrice);
                               return (
                                 <div className="flex flex-col gap-0.5">
-                                  {active ? (
+                                  {active && pause.paused ? (
+                                    <span className="inline-flex w-fit items-center gap-1 rounded-full bg-[var(--color-yellow)]/15 px-1.5 py-0.5 text-[9px] font-bold uppercase text-[var(--color-yellow)]">
+                                      Paused
+                                    </span>
+                                  ) : active ? (
                                     <span className="inline-flex w-fit items-center gap-1 rounded-full bg-[var(--color-green)]/15 px-1.5 py-0.5 text-[9px] font-bold text-[var(--color-green)]">
                                       <span className="h-1.5 w-1.5 rounded-full bg-[var(--color-green)] animate-pulse" />
                                       {detail.halt ? "PAUSED" : "ACTIVE"}
@@ -537,6 +542,14 @@ export function TradeBottomPane({
                                     <span className="rounded px-1.5 py-0.5 text-[9px] font-medium bg-[var(--color-text-muted)]/10 text-[var(--color-text-muted)] capitalize">
                                       {closeLabel || ex.status}
                                     </span>
+                                  )}
+                                  {pause.paused && (
+                                    <>
+                                      {pause.reason && (
+                                        <span className="text-[9px] text-[var(--color-text-muted)]">{pause.reason}</span>
+                                      )}
+                                      <span className="text-[9px] text-[var(--color-green)]">TP and SL active</span>
+                                    </>
                                   )}
                                   {detail.filled && (
                                     <span className="font-mono text-[9px] text-[var(--color-text-muted)]">

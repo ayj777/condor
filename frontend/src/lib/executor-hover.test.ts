@@ -377,6 +377,38 @@ describe("executor hover details", () => {
     expect(closing.rows.find((row) => row.label === "Tier open")?.value).toBe("60 AIOT");
   });
 
+  it("badges a deeper-tier pause and keeps exits active", () => {
+    const model = executorHoverModel(
+      executor({
+        timestamp: 0,
+        pnl: 0,
+        config: {
+          mode: "UP_TO",
+          limit_price: 0.1,
+          take_profit: { percent: "0.02", execution: "SINGLE", order_type: "LIMIT" },
+          stop_loss: { price: "0.07", execution: "SINGLE", order_type: "MARKET" },
+        },
+        custom_info: {
+          entry_paused: true,
+          pause_reason: "deeper tier active",
+          exit_state: "RESTING",
+          exit_active: "take_profit",
+          take_profit_trigger_price: "0.102",
+          stop_loss_trigger_price: "0.07",
+          open_base: "10",
+        },
+      }),
+    );
+    expect(model.entryPaused).toBe(true);
+    expect(model.pauseReason).toBe("deeper tier active");
+    expect(model.rows.find((row) => row.label === "Paused")?.value).toBe("deeper tier active");
+    expect(model.rows.find((row) => row.label === "Exits")?.value).toBe("TP and SL active");
+    expect(model.rows.find((row) => row.label === "Exit status")?.value).toBe("TP resting");
+    expect(model.rows.find((row) => row.label === "TP trigger")?.value).toBe("0.102");
+    expect(model.rows.find((row) => row.label === "SL trigger")?.value).toBe("0.07");
+    expect(model.rows.find((row) => row.label === "Tier open")?.value).toBe("10 AIOT");
+  });
+
   it("labels the shared position apart from the tier and shows a flat external close", () => {
     const shared = executorHoverModel(
       executor({
