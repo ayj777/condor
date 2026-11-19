@@ -104,7 +104,7 @@ describe("executor hover details", () => {
         { label: "Levels", value: "4" },
         { label: "Slice", value: "1,500 AIOT (approx 120.75 USDT)" },
         { label: "Duration", value: "1h" },
-        { label: "Schedule", value: "10 slices, every 30s" },
+        { label: "Schedule", value: "every 30s, 250 AIOT (approx 20.125 USDT)" },
         { label: "Remaining", value: "50m" },
         { label: "Cap", value: "Rest at cap" },
         { label: "Catch up", value: "Carry" },
@@ -126,6 +126,20 @@ describe("executor hover details", () => {
     expect(model.rows.map((row) => row.value).join(" ")).not.toMatch(/\b(BASE|QUOTE|CONTRACTS)\b/);
     expect(model.closeType).toBe("Early Stop");
     expect(model.statusMessage).toBe("Cancel was not confirmed on the exchange");
+  });
+
+  it("derives the interval when an older config only stored schedule slices", () => {
+    const model = executorHoverModel(executor({
+      config: {
+        total_amount: 300,
+        size_unit: "BASE",
+        duration: "1h",
+        schedule_slices: 6,
+      },
+    }));
+    expect(model.rows).toEqual(expect.arrayContaining([
+      { label: "Schedule", value: "every 10m, 50 AIOT" },
+    ]));
   });
 
   it("prices a base size from the mid when nothing has filled", () => {

@@ -65,6 +65,7 @@ import {
 } from "@/lib/gridExecutor";
 import { formatConnectorName, formatPriceSig } from "@/lib/formatters";
 import { baseAmountError, legalBaseAmount, plainOrderPrice, plainOrderSentSize, plainOrderSummary } from "@/lib/order-size";
+import { exitReference, scheduleNote } from "@/lib/range-iceberg";
 import { applyHedge, applyReducing, canonicalPositionMode, claimInflight, ICEBERG_MARGIN_HOLD, icebergCreateHeld, isHedge, marginForOpen, MARGIN_CHOOSE, orderCap, ordersBlockCreate, positionModeBlocksCreate, sideHasOpenPosition, type HedgeBooks, type OpenBook } from "@/lib/trade-guards";
 import { useViewFacts } from "@/lib/viewFacts";
 
@@ -566,6 +567,30 @@ export function CreateExecutor() {
   useViewFacts(() => {
     const side = (n: number) => (n === 1 ? "buy" : "sell");
     const lev = (n: number) => (isSpot ? undefined : `${n}x`);
+    const icebergShown = () => ({
+      side: side(orderConfig.state.side),
+      "order type": "Range iceberg" as const,
+      mode: orderConfig.state.ri_mode,
+      amount: orderConfig.state.ri_total_amount,
+      "size unit": orderConfig.state.ri_size_unit,
+      schedule: scheduleNote({
+        duration: orderConfig.state.ri_duration,
+        interval: orderConfig.state.ri_schedule_interval,
+        total: orderConfig.state.ri_total_amount,
+        unit: orderConfig.state.ri_size_unit,
+        baseSymbol,
+        quoteSymbol,
+        price: exitReference({
+          mode: orderConfig.state.ri_mode,
+          limitPrice: orderConfig.state.ri_limit_price,
+          priceLow: orderConfig.state.ri_price_low,
+          priceHigh: orderConfig.state.ri_price_high,
+        })?.price ?? null,
+        catchUp: orderConfig.state.ri_catch_up,
+      }) ?? undefined,
+      leverage: lev(orderConfig.state.leverage),
+      margin: isSpot ? undefined : orderConfig.state.ri_margin_mode,
+    });
     const range = (low: number, high: number) =>
       low > 0 || high > 0 ? `${formatPriceSig(low)}–${formatPriceSig(high)}` : undefined;
     const shown: Record<string, string | number | null | undefined> =
@@ -587,15 +612,7 @@ export function CreateExecutor() {
             }
           : executorType === "order"
             ? orderConfig.state.execution_strategy === "RANGE_ICEBERG"
-              ? {
-                  side: side(orderConfig.state.side),
-                  "order type": "Range iceberg",
-                  mode: orderConfig.state.ri_mode,
-                  amount: orderConfig.state.ri_total_amount,
-                  "size unit": orderConfig.state.ri_size_unit,
-                  leverage: lev(orderConfig.state.leverage),
-                  margin: isSpot ? undefined : orderConfig.state.ri_margin_mode,
-                }
+              ? icebergShown()
               : {
                   side: side(orderConfig.state.side),
                   "order type": orderConfig.state.execution_strategy,
@@ -634,15 +651,7 @@ export function CreateExecutor() {
                     : undefined,
                 }
             : executorType === "iceberg"
-              ? {
-                  side: side(orderConfig.state.side),
-                  "order type": "Range iceberg",
-                  mode: orderConfig.state.ri_mode,
-                  amount: orderConfig.state.ri_total_amount,
-                  "size unit": orderConfig.state.ri_size_unit,
-                  leverage: lev(orderConfig.state.leverage),
-                  margin: isSpot ? undefined : orderConfig.state.ri_margin_mode,
-                }
+              ? icebergShown()
             : executorType === "dca"
               ? {
                   side: side(dcaConfig.state.side),

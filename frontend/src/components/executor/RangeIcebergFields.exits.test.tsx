@@ -112,6 +112,28 @@ describe("range iceberg exits", () => {
     expect(container.querySelector('button[aria-label="Stop loss prices"]')?.textContent).toContain("Up to");
   });
 
+  it("shows the interval release under the interval field", () => {
+    render({
+      ri_duration: "1h",
+      ri_schedule_interval: "10m",
+      ri_total_amount: 300,
+      ri_size_unit: "QUOTE",
+      ri_catch_up: "CARRY",
+    });
+    const text = container.textContent ?? "";
+    expect(text).not.toContain("Schedule slices");
+    expect(text).toContain("6 slices, about 50 USDT (\u2248 625 AIOT) every 10m");
+    expect(text).toContain("Unfilled size carries into the next interval");
+  });
+
+  it("hides the release note when no duration is set", () => {
+    render({ ri_duration: "", ri_schedule_interval: "10m", ri_total_amount: 300 });
+    const text = container.textContent ?? "";
+    expect(text).not.toContain("Schedule slices");
+    expect(text).not.toContain("every 10m");
+    expect(text).toContain("all at once");
+  });
+
   it("tells the user a single stop loss is a market order", () => {
     render({ ri_sl_enabled: true, ri_sl_execution: "SINGLE" });
     expect(container.textContent).toContain("A single stop loss sends a market order.");

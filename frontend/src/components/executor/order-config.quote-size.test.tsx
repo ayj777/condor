@@ -114,3 +114,52 @@ describe("quote size default", () => {
     expect(() => latest.buildPayload("mexc", "AIOT-USDT", true)).toThrow(/price is required/i);
   });
 });
+
+describe("schedule interval defaults", () => {
+  it("turns a saved slice count into an interval and drops the slice field", () => {
+    localStorage.setItem(ORDER_DEFAULTS_KEY, JSON.stringify({
+      size_unit_version: ORDER_SIZE_UNIT_VERSION,
+      ri_duration: "10m",
+      ri_schedule_slices: 5,
+      ri_schedule_interval: "",
+      ri_size_unit: "QUOTE",
+    }));
+    render();
+    expect(latest.state.ri_schedule_interval).toBe("2m");
+    expect(latest.state).not.toHaveProperty("ri_schedule_slices");
+    const saved = JSON.parse(localStorage.getItem(ORDER_DEFAULTS_KEY) ?? "{}") as Record<string, unknown>;
+    expect(saved.ri_schedule_interval).toBe("2m");
+    expect(saved).not.toHaveProperty("ri_schedule_slices");
+  });
+
+  it("keeps a saved interval when an old slice count is also present", () => {
+    localStorage.setItem(ORDER_DEFAULTS_KEY, JSON.stringify({
+      size_unit_version: ORDER_SIZE_UNIT_VERSION,
+      ri_duration: "10m",
+      ri_schedule_slices: 5,
+      ri_schedule_interval: "30s",
+    }));
+    render();
+    expect(latest.state.ri_schedule_interval).toBe("30s");
+    const saved = JSON.parse(localStorage.getItem(ORDER_DEFAULTS_KEY) ?? "{}") as Record<string, unknown>;
+    expect(saved.ri_schedule_interval).toBe("30s");
+    expect(saved).not.toHaveProperty("ri_schedule_slices");
+  });
+
+  it("sends schedule_interval and never schedule_slices", () => {
+    render();
+    act(() => {
+      latest.dispatch({ type: "SET_FIELD", field: "execution_strategy", value: "RANGE_ICEBERG" });
+      latest.dispatch({ type: "SET_FIELD", field: "ri_mode", value: "UP_TO" });
+      latest.dispatch({ type: "SET_FIELD", field: "ri_limit_price", value: 0.08 });
+      latest.dispatch({ type: "SET_FIELD", field: "ri_total_amount", value: 100 });
+      latest.dispatch({ type: "SET_FIELD", field: "ri_size_unit", value: "BASE" });
+      latest.dispatch({ type: "SET_FIELD", field: "ri_duration", value: "10m" });
+      latest.dispatch({ type: "SET_FIELD", field: "ri_schedule_interval", value: "2m" });
+    });
+    const config = latest.buildPayload("mexc", "AIOT-USDT", true).config;
+    expect(config.duration).toBe("10m");
+    expect(config.schedule_interval).toBe("2m");
+    expect(config).not.toHaveProperty("schedule_slices");
+  });
+});

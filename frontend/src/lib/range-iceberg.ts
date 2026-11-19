@@ -1,4 +1,4 @@
-import { floorBaseAmount, orderStep, type SizeRule } from "./order-size";
+import { floorBaseAmount, formatTokenAmount, orderStep, type SizeRule } from "./order-size";
 
 /**
  * Client-side twin of `RangeIcebergExecutorConfig`.
@@ -56,7 +56,7 @@ export interface RangeIcebergInput {
   visibleCount: number;
   levels: number;
   duration: string;
-  scheduleSlices: number;
+  /** Empty releases the whole size at once. Seconds or `10m`. */
   scheduleInterval: string;
   catchUp: CatchUp;
   capBehavior: CapBehavior;
@@ -108,12 +108,58 @@ export interface RangeIcebergPreview {
   sliceCount: number;
 }
 
+/**
+ * How many releases a duration and interval make.
+ *
+ * The executor uses `max(1, floor(duration / interval))`. A longer interval
+ * than the duration is not a schedule this helper accepts.
+ */
+export function scheduleSliceCount(durationSeconds: number, intervalSeconds: number): number | null {
+  if (!(durationSeconds > 0) || !(intervalSeconds > 0) || intervalSeconds > durationSeconds) return null;
+  return Math.max(1, Math.floor(durationSeconds / intervalSeconds));
+}
+
+/** True when the last part of the duration is shorter than one interval. */
+export function scheduleHasRemainder(durationSeconds: number, intervalSeconds: number): boolean {
+  const count = scheduleSliceCount(durationSeconds, intervalSeconds);
+  if (count == null) return false;
+  return durationSeconds - count * intervalSeconds > 1e-6;
+}
+
+/**
+ * An interval string for a saved slice count.
+ *
+ * `duration / slices`, written so parsing it back still floors to that count.
+ */
+export function intervalFromSliceCount(durationSeconds: number, slices: number): string | null {
+  if (!(durationSeconds > 0) || !(slices >= 1)) return null;
+  const exact = durationSeconds / slices;
+  const units: Array<[string, number]> = [["d", 86400], ["h", 3600], ["m", 60], ["s", 1]];
+  for (const [unit, scale] of units) {
+    const magnitude = exact / scale;
+    const whole = Math.round(magnitude);
+    if (whole > 0 && Math.abs(magnitude - whole) < 1e-9) {
+      const text = unit === "s" ? String(whole) : `${whole}${unit}`;
+      const parsed = parseDuration(text);
+      if (parsed != null && scheduleSliceCount(durationSeconds, parsed) === slices) return text;
+    }
+  }
+  for (let digits = 6; digits <= 12; digits += 1) {
+    const text = `${exact.toFixed(digits)}s`;
+    const parsed = parseDuration(text);
+    if (parsed != null && scheduleSliceCount(durationSeconds, parsed) === slices) return text;
+  }
+  const upper = durationSeconds / slices;
+  const lower = durationSeconds / (slices + 1);
+  const mid = (upper + lower) / 2;
+  return `${mid.toPrecision(12)}s`;
+}
+
 function scheduleCount(input: RangeIcebergInput, seconds: number | null): number | null {
   if (seconds == null) return null;
-  if (input.scheduleSlices >= 1) return input.scheduleSlices;
   const interval = parseDuration(input.scheduleInterval);
-  if (interval != null && interval > 0) return Math.max(1, Math.floor(seconds / interval));
-  return null;
+  if (interval == null) return null;
+  return scheduleSliceCount(seconds, interval);
 }
 
 /** The preview the form shows. Null until a total has been entered. */
@@ -128,10 +174,9 @@ export function rangeIcebergPreview(input: RangeIcebergInput): RangeIcebergPrevi
   const perSlice =
     input.sliceAmount > 0 ? input.sliceAmount : input.totalAmount / sliceCount;
   let intervalSeconds: number | null = null;
-  if (seconds != null && input.scheduleSlices >= 1) {
-    intervalSeconds = seconds / input.scheduleSlices;
-  } else if (seconds != null && input.scheduleInterval.trim()) {
-    intervalSeconds = parseDuration(input.scheduleInterval);
+  if (seconds != null && input.scheduleInterval.trim()) {
+    const parsed = parseDuration(input.scheduleInterval);
+    if (parsed != null && scheduleSliceCount(seconds, parsed) != null) intervalSeconds = parsed;
   }
   const maxPrice =
     input.mode === "RANGE"
@@ -419,22 +464,30 @@ export function validateRangeIceberg(input: RangeIcebergInput): string | null {
   if (!(input.leverage >= 1)) return "Leverage must be at least 1";
   if (input.weight < -1 || input.weight > 1) return "Weight must be between -1 and 1";
   const hasDuration = input.duration.trim().length > 0;
-  if (hasDuration && parseDuration(input.duration) == null) {
+  const durationSeconds = hasDuration ? parseDuration(input.duration) : null;
+  if (hasDuration && durationSeconds == null) {
     return "Duration must be seconds or a value like 30m, 24h, 1d";
   }
-  const hasSlices = input.scheduleSlices >= 1;
   const hasInterval = input.scheduleInterval.trim().length > 0;
-  if (hasInterval && parseDuration(input.scheduleInterval) == null) {
+  const intervalSeconds = hasInterval ? parseDuration(input.scheduleInterval) : null;
+  if (hasInterval && intervalSeconds == null) {
     return "Schedule interval must be seconds or a value like 30s";
   }
-  if (hasDuration && !hasSlices && !hasInterval) {
-    return "A duration needs schedule slices or a schedule interval";
+  if (hasInterval && intervalSeconds != null && !(intervalSeconds > 0)) {
+    return "Schedule interval must be greater than 0";
   }
-  if (hasDuration && hasSlices && hasInterval) {
-    return "Set either schedule slices or a schedule interval, not both";
+  if (hasDuration && !hasInterval) {
+    return "A duration needs a schedule interval";
   }
-  if (!hasDuration && (hasSlices || hasInterval)) {
+  if (!hasDuration && hasInterval) {
     return "A schedule needs a duration";
+  }
+  if (
+    durationSeconds != null &&
+    intervalSeconds != null &&
+    intervalSeconds > durationSeconds
+  ) {
+    return "Schedule interval cannot be longer than the duration";
   }
   if (input.expirySeconds < 0) return "Expiry cannot be negative";
   if (input.maxSlippage < 0) return "Max slippage cannot be negative";
@@ -583,13 +636,68 @@ export function rangeIcebergConfig(
   if (input.randomSeed.trim()) config.random_seed = Number(input.randomSeed.trim());
   if (input.duration.trim()) {
     config.duration = input.duration.trim();
-    if (input.scheduleSlices >= 1) config.schedule_slices = input.scheduleSlices;
-    else if (input.scheduleInterval.trim()) config.schedule_interval = input.scheduleInterval.trim();
+    if (input.scheduleInterval.trim()) config.schedule_interval = input.scheduleInterval.trim();
   }
   if (input.takeProfit) config.take_profit = exitPayload("take_profit", input.takeProfit);
   if (input.stopLoss) config.stop_loss = exitPayload("stop_loss", input.stopLoss);
   if (input.takeProfit || input.stopLoss) config.exit_arming = input.exitArming ?? "ON_FULL_FILL";
   return config;
+}
+
+/**
+ * The line under the interval field.
+ *
+ * Null when no duration is set: the whole size goes out at once, so there is
+ * nothing to spell out. Quote and base are both shown when a price can
+ * convert them. CARRY adds unfilled size to the next interval. SKIP leaves
+ * that size behind.
+ */
+export function scheduleNote(args: {
+  duration: string;
+  interval: string;
+  total: number;
+  unit: SizeUnit;
+  baseSymbol: string;
+  quoteSymbol: string;
+  price: number | null;
+  catchUp: CatchUp;
+}): string | null {
+  if (!args.duration.trim()) return null;
+  const seconds = parseDuration(args.duration);
+  const intervalSeconds = parseDuration(args.interval);
+  if (seconds == null || intervalSeconds == null) return null;
+  const count = scheduleSliceCount(seconds, intervalSeconds);
+  if (count == null) return null;
+  const every = formatInterval(intervalSeconds);
+  const pieces = [`${count} ${count === 1 ? "slice" : "slices"}`];
+  if (args.total > 0) {
+    const per = args.total / count;
+    const symbol = args.unit === "QUOTE"
+      ? args.quoteSymbol
+      : args.unit === "CONTRACTS"
+        ? "contracts"
+        : args.baseSymbol;
+    const amount = [formatTokenAmount(per), symbol].filter(Boolean).join(" ");
+    let other = "";
+    if (args.price != null && args.price > 0 && args.unit !== "CONTRACTS") {
+      const converted = Number((args.unit === "QUOTE" ? per / args.price : per * args.price).toPrecision(12));
+      const otherSymbol = args.unit === "QUOTE" ? args.baseSymbol : args.quoteSymbol;
+      if (otherSymbol) other = ` (\u2248 ${formatTokenAmount(converted)} ${otherSymbol})`;
+    }
+    pieces.push(`about ${amount}${other}`);
+  }
+  const sentences = [`${pieces.join(", ")} every ${every}`];
+  if (scheduleHasRemainder(seconds, intervalSeconds)) {
+    sentences.push("The last part of the duration gets no new slice");
+  }
+  if (count > 1) {
+    sentences.push(
+      args.catchUp === "SKIP"
+        ? "Unfilled size is left behind. The next interval releases only its own share"
+        : "Unfilled size carries into the next interval",
+    );
+  }
+  return `${sentences.join(". ")}.`;
 }
 
 export function formatInterval(seconds: number | null): string {
