@@ -65,7 +65,7 @@ import {
 } from "@/lib/gridExecutor";
 import { formatConnectorName, formatPriceSig } from "@/lib/formatters";
 import { baseAmountError, legalBaseAmount, plainOrderPrice, plainOrderSentSize, plainOrderSummary } from "@/lib/order-size";
-import { icebergSentSize, scheduleNote } from "@/lib/range-iceberg";
+import { icebergSentSize, oneAtATimeText, scheduleNote } from "@/lib/range-iceberg";
 import { applyHedge, applyReducing, bookForOrder, canonicalPositionMode, claimInflight, ICEBERG_MARGIN_HOLD, icebergCreateHeld, isHedge, marginForOpen, MARGIN_CHOOSE, orderCap, ordersBlockCreate, positionModeBlocksCreate, sideHasOpenPosition, type HedgeBooks, type OpenBook } from "@/lib/trade-guards";
 import { useViewFacts } from "@/lib/viewFacts";
 
@@ -84,7 +84,7 @@ const TYPE_LABELS: Record<ExecutorType, string> = {
   grid: "Grid Executor",
   position: "Position Executor",
   order: "Order Executor",
-  iceberg: "Range Iceberg",
+  iceberg: "Iceberg",
   dca: "DCA Executor",
   lp: "LP Executor",
 };
@@ -580,7 +580,12 @@ export function CreateExecutor() {
     const lev = (n: number) => (isSpot ? undefined : `${n}x`);
     const icebergShown = () => ({
       side: side(orderConfig.state.side),
-      "order type": "Range iceberg" as const,
+      "order type": "Iceberg" as const,
+      orders: oneAtATimeText(
+        orderConfig.state.ri_visible_count,
+        orderConfig.state.ri_duration,
+        orderConfig.state.ri_schedule_interval,
+      ),
       mode: orderConfig.state.ri_mode,
       amount: orderConfig.state.ri_total_amount,
       "size unit": orderConfig.state.ri_size_unit,
@@ -1245,7 +1250,7 @@ export function CreateExecutor() {
                       <Rocket className="h-4 w-4" />
                     )}
                     {executorType === "iceberg" || orderConfig.state.execution_strategy === "RANGE_ICEBERG"
-                      ? "Create Range Iceberg"
+                      ? "Create Iceberg"
                       : `Create ${TYPE_LABELS[executorType]}`}
                   </button>
                 </div>
@@ -1265,7 +1270,7 @@ export function CreateExecutor() {
           executorId={successInfo.id}
           title={
             successInfo.type === "order" && orderConfig.state.execution_strategy === "RANGE_ICEBERG"
-              ? "Range Iceberg Created"
+              ? "Iceberg Created"
               : `${TYPE_LABELS[successInfo.type]} Created`
           }
           subtitle={

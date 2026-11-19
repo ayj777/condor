@@ -4,6 +4,7 @@ import {
   exitPreviewText,
   exitTriggerPrice,
   icebergSentSize,
+  oneAtATimeText,
   intervalFromSliceCount,
   parseDuration,
   rangeIcebergConfig,
@@ -69,6 +70,20 @@ function exit(over: Partial<RangeIcebergExitInput> = {}): RangeIcebergExitInput 
     ...over,
   };
 }
+
+describe("one order at a time", () => {
+  it("says the next order waits for a fill, and names the interval when one is set", () => {
+    expect(oneAtATimeText(1, "", "")).toBe(
+      "One order at a time. The next is placed after the previous one fills.",
+    );
+    expect(oneAtATimeText(1, "10m", "1m")).toBe(
+      "One order at a time. The next is placed after the previous one fills. A new share is released every 1m.",
+    );
+    expect(oneAtATimeText(2, "", "")).toBe(
+      "2 orders at a time. The next is placed after one of them fills.",
+    );
+  });
+});
 
 describe("range iceberg", () => {
   it("parses the duration spellings the executor accepts", () => {

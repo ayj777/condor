@@ -8,9 +8,8 @@ import {
   formatInterval,
   icebergSentSize,
   jitterNote,
+  oneAtATimeText,
   rangeIcebergPreview,
-  restingOrderCount,
-  restingOrderText,
   scheduleNote,
   scheduleStartLine,
   stopProtectionText,
@@ -368,7 +367,7 @@ export function RangeIcebergFields({
   const childLine = preview
     ? [formatTokenAmount(preview.perSlice), unitSymbol].filter(Boolean).join(" ")
     : "";
-  const resting = restingOrderText(restingOrderCount(input));
+  const pacing = oneAtATimeText(state.ri_visible_count, state.ri_duration, state.ri_schedule_interval);
   const jitter = jitterNote(input);
   const stopTrigger = state.ri_sl_enabled
     ? exitTriggerPrice(
@@ -384,7 +383,7 @@ export function RangeIcebergFields({
 
   return (
     <div className="space-y-2.5">
-      <SectionHeader>Range iceberg</SectionHeader>
+      <SectionHeader>Iceberg</SectionHeader>
       <SelectField
         label="Mode"
         value={state.ri_mode}
@@ -452,11 +451,7 @@ export function RangeIcebergFields({
           valid={state.ri_limit_price > 0}
         />
       )}
-      <Toggle label="Iceberg" checked={state.ri_iceberg} onChange={(v) => set("ri_iceberg", v)} />
-      {state.ri_iceberg && (
-        <NumberField label="Visible count" value={state.ri_visible_count} field="ri_visible_count" dispatch={dispatch} step={1} min={1} />
-      )}
-      <p className="text-[10px] text-[var(--color-text-muted)]">{resting}</p>
+      <p className="text-[10px] text-[var(--color-text-muted)]">{pacing}</p>
       <NumberField
         label={state.ri_mode === "RANGE" ? "Price rungs" : "Levels"}
         value={state.ri_levels}
@@ -566,6 +561,7 @@ export function RangeIcebergFields({
             <p>Child size {childLine}{state.ri_mode === "UP_TO" && state.ri_size_unit === "QUOTE" ? " at the limit. A better price buys more base." : ""}</p>
           )}
           <p>Interval {formatInterval(preview.intervalSeconds)}</p>
+          <p>{pacing}</p>
           {jitter && <p>{jitter}</p>}
           {sent.error && <p className="text-[var(--color-red)]">{sent.error}</p>}
         </div>
@@ -582,6 +578,14 @@ export function RangeIcebergFields({
       </button>
       {advanced && (
         <div className="space-y-2.5">
+          <NumberField
+            label="orders shown at once"
+            value={state.ri_visible_count}
+            field="ri_visible_count"
+            dispatch={dispatch}
+            step={1}
+            min={1}
+          />
           {state.ri_mode === "RANGE" && (
             <>
               <SelectField label="Distribution" value={state.ri_distribution} field="ri_distribution" dispatch={dispatch} options={DISTRIBUTION_OPTIONS} />
