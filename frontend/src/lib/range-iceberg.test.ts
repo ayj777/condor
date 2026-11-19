@@ -3,9 +3,13 @@ import { describe, expect, it } from "vitest";
 import {
   exitPreviewText,
   exitTriggerPrice,
+  intervalFromSliceCount,
   parseDuration,
   rangeIcebergConfig,
   rangeIcebergPreview,
+  scheduleHasRemainder,
+  scheduleNote,
+  scheduleSliceCount,
   validateRangeIceberg,
   type RangeIcebergExitInput,
   type RangeIcebergInput,
@@ -24,8 +28,7 @@ function input(over: Partial<RangeIcebergInput> = {}): RangeIcebergInput {
     visibleCount: 2,
     levels: 10,
     duration: "10m",
-    scheduleSlices: 5,
-    scheduleInterval: "",
+    scheduleInterval: "2m",
     catchUp: "CARRY",
     capBehavior: "REST_AT_CAP",
     leverage: 2,
@@ -85,7 +88,7 @@ describe("range iceberg", () => {
   });
 
   it("uses levels when there is no schedule", () => {
-    const preview = rangeIcebergPreview(input({ duration: "", scheduleSlices: 0 }));
+    const preview = rangeIcebergPreview(input({ duration: "", scheduleInterval: "" }));
     expect(preview?.perSlice).toBe(10);
     expect(preview?.intervalSeconds).toBeNull();
     expect(preview?.sliceCount).toBe(10);
@@ -99,7 +102,7 @@ describe("range iceberg", () => {
   });
 
   it("submits the executor config fields", () => {
-    const config = rangeIcebergConfig(input({ mode: "UP_TO", limitPrice: 0.08, duration: "" , scheduleSlices: 0 }), "mexc_perpetual", "AIOT-USDT");
+    const config = rangeIcebergConfig(input({ mode: "UP_TO", limitPrice: 0.08, duration: "", scheduleInterval: "" }), "mexc_perpetual", "AIOT-USDT");
     expect(config).toMatchObject({
       connector_name: "mexc_perpetual",
       trading_pair: "AIOT-USDT",
@@ -115,6 +118,7 @@ describe("range iceberg", () => {
       min_order_interval: 0.6,
     });
     expect(config.duration).toBeUndefined();
+    expect(config.schedule_slices).toBeUndefined();
     expect(config.price_low).toBeUndefined();
     expect(config.margin_mode).toBeUndefined();
     expect(rangeIcebergConfig(input(), "mexc_perpetual", "AIOT-USDT", true).margin_mode).toBe(
@@ -266,7 +270,7 @@ describe("range iceberg", () => {
   });
 
   it("rejects a percent outside (0, 1) and a trigger on the wrong side of the entry", () => {
-    const up = input({ mode: "UP_TO", limitPrice: 0.08, duration: "", scheduleSlices: 0 });
+    const up = input({ mode: "UP_TO", limitPrice: 0.08, duration: "", scheduleInterval: "" });
     expect(validateRangeIceberg(up)).toBeNull();
     for (const percent of [0, 1, 1.5, -0.01]) {
       expect(validateRangeIceberg({ ...up, takeProfit: exit({ percent }) })).toMatch(/less than 1/);
@@ -307,7 +311,7 @@ describe("range iceberg", () => {
   });
 
   it("requires an iceberg limit or range, and keeps visible count within slices", () => {
-    const up = input({ mode: "UP_TO", limitPrice: 0.08, duration: "", scheduleSlices: 0 });
+    const up = input({ mode: "UP_TO", limitPrice: 0.08, duration: "", scheduleInterval: "" });
     expect(
       validateRangeIceberg({
         ...up,
@@ -359,7 +363,7 @@ describe("range iceberg", () => {
   });
 
   it("rejects a stop loss iceberg whose limit or range is on the wrong side of the trigger", () => {
-    const up = input({ mode: "UP_TO", limitPrice: 0.08, duration: "", scheduleSlices: 0 });
+    const up = input({ mode: "UP_TO", limitPrice: 0.08, duration: "", scheduleInterval: "" });
     const iceberg = {
       percent: 0.01,
       execution: "ICEBERG" as const,
@@ -438,5 +442,84 @@ describe("range iceberg", () => {
         }),
       }),
     ).toBeNull();
+  });
+
+  it("sends a schedule interval and never schedule slices", () => {
+    const config = rangeIcebergConfig(input(), "mexc_perpetual", "AIOT-USDT");
+    expect(config.duration).toBe("10m");
+    expect(config.schedule_interval).toBe("2m");
+    expect(config).not.toHaveProperty("schedule_slices");
+  });
+
+  it("counts slices with the executor formula, including a short last part", () => {
+    expect(scheduleSliceCount(600, 120)).toBe(5);
+    expect(scheduleSliceCount(25 * 60, 10 * 60)).toBe(2);
+    expect(scheduleHasRemainder(25 * 60, 10 * 60)).toBe(true);
+    expect(scheduleHasRemainder(600, 120)).toBe(false);
+    expect(scheduleSliceCount(60, 120)).toBeNull();
+    expect(intervalFromSliceCount(3600, 7)).toBeTruthy();
+    const uneven = parseDuration(intervalFromSliceCount(3600, 7) ?? "");
+    expect(uneven).not.toBeNull();
+    expect(scheduleSliceCount(3600, uneven ?? 0)).toBe(7);
+  });
+
+  it("states the per-interval amount in quote and in base", () => {
+    expect(scheduleNote({
+      duration: "1h",
+      interval: "10m",
+      total: 300,
+      unit: "QUOTE",
+      baseSymbol: "AIOT",
+      quoteSymbol: "USDT",
+      price: 0.08,
+      catchUp: "CARRY",
+    })).toBe(
+      "6 slices, about 50 USDT (\u2248 625 AIOT) every 10m. Unfilled size carries into the next interval.",
+    );
+    expect(scheduleNote({
+      duration: "25m",
+      interval: "10m",
+      total: 100,
+      unit: "BASE",
+      baseSymbol: "AIOT",
+      quoteSymbol: "USDT",
+      price: 0.08,
+      catchUp: "SKIP",
+    })).toBe(
+      "2 slices, about 50 AIOT (\u2248 4 USDT) every 10m. The last part of the duration gets no new slice. Unfilled size is left behind. The next interval releases only its own share.",
+    );
+  });
+
+  it("hides the schedule note when no duration is set", () => {
+    const common = {
+      interval: "10m",
+      total: 300,
+      unit: "QUOTE" as const,
+      baseSymbol: "AIOT",
+      quoteSymbol: "USDT",
+      price: 0.08,
+      catchUp: "CARRY" as const,
+    };
+    expect(scheduleNote({ ...common, duration: "" })).toBeNull();
+    expect(scheduleNote({ ...common, duration: "1h", interval: "" })).toBeNull();
+    expect(scheduleNote({ ...common, duration: "10m", interval: "soon" })).toBeNull();
+  });
+
+  it("rejects a missing, invalid, or too-long schedule interval", () => {
+    expect(validateRangeIceberg(input({ scheduleInterval: "" }))).toBe(
+      "A duration needs a schedule interval",
+    );
+    expect(validateRangeIceberg(input({ duration: "", scheduleInterval: "30s" }))).toBe(
+      "A schedule needs a duration",
+    );
+    expect(validateRangeIceberg(input({ scheduleInterval: "soon" }))).toBe(
+      "Schedule interval must be seconds or a value like 30s",
+    );
+    expect(validateRangeIceberg(input({ scheduleInterval: "0" }))).toBe(
+      "Schedule interval must be greater than 0",
+    );
+    expect(validateRangeIceberg(input({ duration: "10m", scheduleInterval: "1h" }))).toBe(
+      "Schedule interval cannot be longer than the duration",
+    );
   });
 });

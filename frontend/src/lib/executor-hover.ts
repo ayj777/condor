@@ -271,11 +271,24 @@ export function executorHoverModel(
   if (text(duration)) add("Duration", durationSec != null ? formatDuration(durationSec) : text(duration));
   const slices = num(first(cfg, info, ["schedule_slices"]));
   const intervalRaw = first(cfg, info, ["schedule_interval"]);
-  const intervalNum = num(intervalRaw);
-  const interval = intervalNum != null ? formatDuration(intervalNum) : text(intervalRaw);
-  const schedule = [slices != null && slices > 0 ? `${slices} slices` : "", interval ? `every ${interval}` : ""]
-    .filter(Boolean)
-    .join(", ");
+  const hasInterval = text(intervalRaw) !== "";
+  let intervalSec: number | null = hasInterval ? durationSeconds(intervalRaw) : null;
+  if ((intervalSec == null || !(intervalSec > 0)) && slices != null && slices >= 1 && durationSec != null && durationSec > 0) {
+    intervalSec = durationSec / slices;
+  }
+  let perInterval = "";
+  if (intervalSec != null && intervalSec > 0 && total != null && total > 0) {
+    const count = !hasInterval && slices != null && slices >= 1
+      ? Math.floor(slices)
+      : durationSec != null && durationSec > 0 && intervalSec <= durationSec
+        ? Math.max(1, Math.floor(durationSec / intervalSec))
+        : null;
+    if (count != null && count >= 1) perInterval = amountText(total / count);
+  }
+  const schedule = [
+    intervalSec != null && intervalSec > 0 ? `every ${formatDuration(intervalSec)}` : "",
+    perInterval,
+  ].filter(Boolean).join(", ");
   if (schedule) add("Schedule", schedule);
   const started = startedAt(executor);
   if (durationSec != null && started != null) {

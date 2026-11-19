@@ -7,6 +7,7 @@ import {
   formatInterval,
   icebergSentSize,
   rangeIcebergPreview,
+  scheduleNote,
   type ExitKind,
   type RangeIcebergExitInput,
 } from "@/lib/range-iceberg";
@@ -319,6 +320,16 @@ export function RangeIcebergFields({
       : sentQuote
         ? `${sentBaseText} (${sentQuote})`
         : sentBaseText;
+  const scheduleText = scheduleNote({
+    duration: state.ri_duration,
+    interval: state.ri_schedule_interval,
+    total: state.ri_total_amount,
+    unit: state.ri_size_unit,
+    baseSymbol,
+    quoteSymbol,
+    price: reference?.price ?? null,
+    catchUp: state.ri_catch_up,
+  });
   const sliceLine = sent.error
     ? [formatTokenAmount(preview?.perSlice ?? 0), unitSymbol].filter(Boolean).join(" ")
     : sentQuote
@@ -400,14 +411,13 @@ export function RangeIcebergFields({
         <NumberField label="Visible count" value={state.ri_visible_count} field="ri_visible_count" dispatch={dispatch} step={1} min={1} />
         <NumberField label="Levels" value={state.ri_levels} field="ri_levels" dispatch={dispatch} step={1} min={1} />
       </div>
-      <TextField
-        label="Duration"
-        value={state.ri_duration}
-        placeholder="24h, 30m, or seconds"
-        onChange={(v) => set("ri_duration", v)}
-      />
       <div className="grid grid-cols-2 gap-2">
-        <NumberField label="Schedule slices" value={state.ri_schedule_slices} field="ri_schedule_slices" dispatch={dispatch} step={1} min={0} />
+        <TextField
+          label="Duration"
+          value={state.ri_duration}
+          placeholder="24h, 30m, or seconds"
+          onChange={(v) => set("ri_duration", v)}
+        />
         <TextField
           label="Schedule interval"
           value={state.ri_schedule_interval}
@@ -415,6 +425,9 @@ export function RangeIcebergFields({
           onChange={(v) => set("ri_schedule_interval", v)}
         />
       </div>
+      {scheduleText && (
+        <p className="text-[10px] text-[var(--color-text-muted)]">{scheduleText}</p>
+      )}
       <SelectField label="Catch up" value={state.ri_catch_up} field="ri_catch_up" dispatch={dispatch} options={CATCH_UP_OPTIONS} />
       <SelectField label="Cap behavior" value={state.ri_cap_behavior} field="ri_cap_behavior" dispatch={dispatch} options={CAP_OPTIONS} />
       <Toggle label="Reduce only" checked={state.ri_reduce_only} onChange={(v) => set("ri_reduce_only", v)} />

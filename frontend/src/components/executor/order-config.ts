@@ -18,6 +18,8 @@ import {
   exitReference,
   exitTriggerPrice,
   icebergSentSize,
+  intervalFromSliceCount,
+  parseDuration,
   rangeIcebergConfig,
   validateRangeIceberg,
   type ExitExecution,
@@ -62,7 +64,6 @@ export interface OrderState {
   ri_visible_count: number;
   ri_levels: number;
   ri_duration: string;
-  ri_schedule_slices: number;
   ri_schedule_interval: string;
   ri_catch_up: "CARRY" | "SKIP";
   ri_cap_behavior: "REST_AT_CAP" | "WAIT";
@@ -161,7 +162,6 @@ export const ORDER_DEFAULTS: OrderState = {
   ri_visible_count: 1,
   ri_levels: 10,
   ri_duration: "",
-  ri_schedule_slices: 0,
   ri_schedule_interval: "",
   ri_catch_up: "CARRY",
   ri_cap_behavior: "REST_AT_CAP",
@@ -219,7 +219,7 @@ const PERSISTED_FIELDS: (keyof OrderState)[] = [
   "side", "amount", "amount_unit", "execution_strategy", "leverage",
   "chaser_distance", "chaser_refresh_threshold", "position_action",
   "ri_mode", "ri_total_amount", "ri_size_unit", "ri_iceberg", "ri_visible_count",
-  "ri_levels", "ri_duration", "ri_schedule_slices", "ri_schedule_interval",
+  "ri_levels", "ri_duration", "ri_schedule_interval",
   "ri_catch_up", "ri_cap_behavior", "ri_margin_mode", "ri_reduce_only",
   "ri_distribution", "ri_weight", "ri_post_only", "ri_min_order_interval",
 ];
@@ -248,7 +248,29 @@ function loadSavedDefaults(): OrderState {
     loaded.ri_size_unit = loaded.ri_size_unit === "BASE" ? "BASE" : "QUOTE";
     loaded.amount_unit = loaded.amount_unit === "BASE" ? "BASE" : "QUOTE";
   }
+  if (saved && !String(saved.ri_schedule_interval ?? "").trim()) {
+    const derived = intervalFromSavedSlices(saved);
+    if (derived) loaded.ri_schedule_interval = derived;
+  }
   return loaded;
+}
+
+/** `duration / slices` when an older default stored a slice count and no interval. */
+function intervalFromSavedSlices(saved: Record<string, unknown>): string | null {
+  if (!("ri_schedule_slices" in saved)) return null;
+  const slices = Number(saved.ri_schedule_slices);
+  const duration = parseDuration(String(saved.ri_duration ?? ""));
+  if (!(slices >= 1) || duration == null) return null;
+  return intervalFromSliceCount(duration, slices);
+}
+
+function dropSavedScheduleSlices(saved: Record<string, unknown>) {
+  if (!("ri_schedule_slices" in saved)) return;
+  if (!String(saved.ri_schedule_interval ?? "").trim()) {
+    const derived = intervalFromSavedSlices(saved);
+    if (derived) saved.ri_schedule_interval = derived;
+  }
+  delete saved.ri_schedule_slices;
 }
 
 function saveDefaults(state: OrderState) {
@@ -263,6 +285,7 @@ function persistSizeUnits(sizeUnit: OrderState["ri_size_unit"], amountUnit: Orde
   saved.size_unit_version = ORDER_SIZE_UNIT_VERSION;
   saved.ri_size_unit = sizeUnit;
   saved.amount_unit = amountUnit;
+  dropSavedScheduleSlices(saved);
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(saved));
   } catch {
@@ -421,7 +444,6 @@ export function rangeIcebergInput(state: OrderState): RangeIcebergInput {
     visibleCount: state.ri_visible_count,
     levels: state.ri_levels,
     duration: state.ri_duration,
-    scheduleSlices: state.ri_schedule_slices,
     scheduleInterval: state.ri_schedule_interval,
     catchUp: state.ri_catch_up,
     capBehavior: state.ri_cap_behavior,

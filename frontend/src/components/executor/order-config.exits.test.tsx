@@ -59,7 +59,6 @@ describe("order config exits", () => {
     setField("ri_limit_price", 0.08);
     setField("ri_total_amount", 100);
     setField("ri_duration", "");
-    setField("ri_schedule_slices", 0);
     const off = latest.buildPayload("mexc_perpetual", "AIOT-USDT", true);
     expect(off.config.take_profit).toBeUndefined();
     expect(off.config.stop_loss).toBeUndefined();
@@ -102,7 +101,6 @@ describe("order config exits", () => {
     setField("ri_limit_price", 0.08);
     setField("ri_total_amount", 100);
     setField("ri_duration", "");
-    setField("ri_schedule_slices", 0);
     setField("ri_sl_enabled", true);
     setField("ri_sl_percent", 0.01);
     setField("ri_sl_execution", "ICEBERG");
@@ -120,7 +118,6 @@ describe("order config exits", () => {
     setField("ri_limit_price", 0.08);
     setField("ri_total_amount", 100);
     setField("ri_duration", "");
-    setField("ri_schedule_slices", 0);
     setField("position_action", "CLOSE");
     setField("ri_tp_enabled", true);
     setField("ri_tp_percent", 0.02);

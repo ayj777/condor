@@ -17,7 +17,6 @@ const input = (patch: Partial<RangeIcebergInput> = {}): RangeIcebergInput => ({
   visibleCount: 2,
   levels: 10,
   duration: "",
-  scheduleSlices: 0,
   scheduleInterval: "",
   catchUp: "CARRY",
   capBehavior: "REST_AT_CAP",
@@ -189,7 +188,7 @@ describe("review guards", () => {
 
   it("rounds a base iceberg down to a whole contract", () => {
     const sent = icebergSentSize(
-      input({ totalAmount: 25, levels: 1, duration: "", scheduleSlices: 0 }),
+      input({ totalAmount: 25, levels: 1, duration: "", scheduleInterval: "" }),
       { minOrderSize: 10, increment: 1, contractSize: 10 },
       0,
       false,
