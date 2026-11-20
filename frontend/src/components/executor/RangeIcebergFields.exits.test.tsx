@@ -168,6 +168,22 @@ describe("range iceberg exits", () => {
     expect(expiring).not.toContain("No time limit");
   });
 
+  it("says a sell slice sells at the limit or better", () => {
+    render({
+      side: 2,
+      ri_duration: "",
+      ri_schedule_interval: "10m",
+      ri_total_amount: 100,
+      ri_slice_amount: 30,
+      ri_size_unit: "QUOTE",
+    });
+    const text = container.textContent ?? "";
+    expect(text).toContain(
+      "Each slice sells at the limit or better. 3 slices of 30 USDT then 10 USDT.",
+    );
+    expect(text).not.toContain("Each slice buys");
+  });
+
   it("tells the user a single stop loss is a market order", () => {
     render({ ri_sl_enabled: true, ri_sl_execution: "SINGLE" });
     expect(container.textContent).toContain("A single stop loss sends a market order.");

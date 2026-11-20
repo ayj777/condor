@@ -374,8 +374,9 @@ export function RangeIcebergFields({
     ? [formatTokenAmount(preview.perSlice), unitSymbol].filter(Boolean).join(" ")
     : "";
   const quoteUpTo = state.ri_mode === "UP_TO" && state.ri_size_unit === "QUOTE";
+  const sliceVerb = state.side === 1 ? "buys" : "sells";
   const childText = uneven && quoteUpTo
-    ? `Each slice buys at the limit or better. ${uneven}.`
+    ? `Each slice ${sliceVerb} at the limit or better. ${uneven}.`
     : `${uneven ?? `Child size ${childLine}`}${
         quoteUpTo ? " at the limit. A better price buys more base." : ""
       }`;
