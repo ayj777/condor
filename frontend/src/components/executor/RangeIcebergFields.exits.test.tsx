@@ -121,7 +121,6 @@ describe("range iceberg exits", () => {
       ri_schedule_interval: "10m",
       ri_total_amount: 300,
       ri_size_unit: "QUOTE",
-      ri_catch_up: "CARRY",
     });
     const text = container.textContent ?? "";
     expect(text).not.toContain("Schedule slices");
@@ -150,7 +149,10 @@ describe("range iceberg exits", () => {
       ri_size_unit: "QUOTE",
     });
     const open = container.textContent ?? "";
-    expect(open).toContain("3 slices of 30 USDT then 10 USDT");
+    expect(open).toContain(
+      "Each slice buys at the limit or better. 3 slices of 30 USDT then 10 USDT.",
+    );
+    expect(open).not.toContain("then 10 USDT at the limit");
     expect(open).not.toContain("about 25");
     expect(open).toContain("No time limit; runs until the full amount fills");
     render({
@@ -217,18 +219,18 @@ describe("range iceberg exits", () => {
     expect(options.some((label) => /ladder/i.test(label))).toBe(false);
   });
 
-  it("shows schedule start only with a duration, and labels catch up for exits", () => {
+  it("shows schedule start only with a duration", () => {
     render({ ri_duration: "", ri_schedule_interval: "" });
     expect(container.textContent).toContain("Expiry, from submit");
     expect(container.textContent).not.toContain("Schedule start");
-    expect(container.textContent).not.toContain("Exit catch up");
+    expect(container.textContent).not.toContain("Catch up");
     render({ ri_duration: "", ri_schedule_interval: "30s" });
     expect(container.textContent).not.toContain("Schedule start");
-    expect(container.textContent).not.toContain("Exit catch up");
+    expect(container.textContent).not.toContain("Catch up");
     render({ ri_duration: "10m", ri_schedule_interval: "2m", ri_schedule_start: "SUBMIT" });
     expect(container.textContent).toContain("Schedule start");
     expect(container.textContent).toContain("The duration clock starts when you submit");
-    expect(container.textContent).toContain("Exit catch up");
+    expect(container.textContent).not.toContain("Catch up");
     expect(container.textContent).not.toContain("missed slice");
   });
 

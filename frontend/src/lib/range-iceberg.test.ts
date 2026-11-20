@@ -241,6 +241,10 @@ describe("range iceberg", () => {
       min_order_interval: 0.6,
     });
     expect(config.duration).toBeUndefined();
+    expect(config).not.toHaveProperty("catch_up");
+    expect(
+      rangeIcebergConfig(input({ catchUp: "SKIP" }), "mexc_perpetual", "AIOT-USDT"),
+    ).not.toHaveProperty("catch_up");
     expect(config.schedule_slices).toBeUndefined();
     expect(config.price_low).toBeUndefined();
     expect(config.margin_mode).toBeUndefined();

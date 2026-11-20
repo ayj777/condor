@@ -931,7 +931,6 @@ export function rangeIcebergConfig(
     iceberg: input.iceberg,
     visible_count: input.visibleCount,
     min_order_interval: input.minOrderInterval,
-    catch_up: input.catchUp,
     reduce_only: input.reduceOnly,
     leverage: input.leverage,
   };
