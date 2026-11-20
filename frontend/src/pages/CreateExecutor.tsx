@@ -604,6 +604,7 @@ export function CreateExecutor() {
           orderConfig.state.ri_limit_price,
           orderConfig.state.ri_contracts_confirmed,
         ).baseTotal,
+        expiry: orderConfig.state.ri_expiry,
       }) ?? undefined,
       leverage: lev(orderConfig.state.leverage),
       margin: isSpot ? undefined : orderConfig.state.ri_margin_mode,

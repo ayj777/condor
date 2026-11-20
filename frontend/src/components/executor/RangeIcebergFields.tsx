@@ -12,6 +12,7 @@ import {
   rangeIcebergPreview,
   scheduleNote,
   scheduleStartLine,
+  unevenSliceText,
   stopProtectionText,
   upToTakeProfitNote,
   type ExitKind,
@@ -367,7 +368,12 @@ export function RangeIcebergFields({
     quoteSymbol,
     price: state.ri_mode === "UP_TO" ? (state.ri_limit_price > 0 ? state.ri_limit_price : null) : null,
     baseTotal: !sent.error && state.ri_size_unit === "QUOTE" ? sent.baseTotal : null,
+    expiry: state.ri_expiry,
   });
+  const sizedTotal = sent.error ? state.ri_total_amount : sent.total;
+  const uneven = state.ri_duration.trim()
+    ? null
+    : unevenSliceText(sizedTotal, state.ri_slice_amount, unitSymbol);
   const childLine = preview
     ? [formatTokenAmount(preview.perSlice), unitSymbol].filter(Boolean).join(" ")
     : "";
@@ -484,7 +490,7 @@ export function RangeIcebergFields({
         placeholder="30s"
         onChange={(v) => set("ri_schedule_interval", v)}
       />
-      {(state.ri_duration.trim() || state.ri_schedule_interval.trim()) && (
+      {state.ri_duration.trim() && (
         <>
           <SelectField
             label="Schedule start"
@@ -500,7 +506,13 @@ export function RangeIcebergFields({
         <p className="text-[10px] text-[var(--color-text-muted)]">{scheduleText}</p>
       )}
       {state.ri_duration.trim() && (
-        <SelectField label="Catch up" value={state.ri_catch_up} field="ri_catch_up" dispatch={dispatch} options={CATCH_UP_OPTIONS} />
+        <SelectField
+          label="Exit catch up"
+          value={state.ri_catch_up}
+          field="ri_catch_up"
+          dispatch={dispatch}
+          options={CATCH_UP_OPTIONS}
+        />
       )}
       {showCap && (
         <SelectField
@@ -565,7 +577,12 @@ export function RangeIcebergFields({
           {state.ri_mode === "RANGE" ? (
             <p>{sent.rungs ?? preview.sliceCount} price rungs</p>
           ) : (
-            <p>Child size {childLine}{state.ri_mode === "UP_TO" && state.ri_size_unit === "QUOTE" ? " at the limit. A better price buys more base." : ""}</p>
+            <p>
+              {uneven ? uneven : `Child size ${childLine}`}
+              {state.ri_mode === "UP_TO" && state.ri_size_unit === "QUOTE"
+                ? " at the limit. A better price buys more base."
+                : ""}
+            </p>
           )}
           <p>Interval {formatInterval(preview.intervalSeconds)}</p>
           <p>{pacing}</p>

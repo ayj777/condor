@@ -141,6 +141,31 @@ describe("range iceberg exits", () => {
     expect(text).toContain("No time limit; runs until the full amount fills");
   });
 
+  it("shows the real slice sizes and stops the note at expiry", () => {
+    render({
+      ri_duration: "",
+      ri_schedule_interval: "10m",
+      ri_total_amount: 100,
+      ri_slice_amount: 30,
+      ri_size_unit: "QUOTE",
+    });
+    const open = container.textContent ?? "";
+    expect(open).toContain("3 slices of 30 USDT then 10 USDT");
+    expect(open).not.toContain("about 25");
+    expect(open).toContain("No time limit; runs until the full amount fills");
+    render({
+      ri_duration: "",
+      ri_schedule_interval: "10m",
+      ri_total_amount: 100,
+      ri_slice_amount: 30,
+      ri_size_unit: "QUOTE",
+      ri_expiry: "30m",
+    });
+    const expiring = container.textContent ?? "";
+    expect(expiring).toContain("The run stops at expiry if size is still left");
+    expect(expiring).not.toContain("No time limit");
+  });
+
   it("tells the user a single stop loss is a market order", () => {
     render({ ri_sl_enabled: true, ri_sl_execution: "SINGLE" });
     expect(container.textContent).toContain("A single stop loss sends a market order.");
@@ -192,18 +217,19 @@ describe("range iceberg exits", () => {
     expect(options.some((label) => /ladder/i.test(label))).toBe(false);
   });
 
-  it("shows schedule start with a duration or an interval", () => {
+  it("shows schedule start only with a duration, and labels catch up for exits", () => {
     render({ ri_duration: "", ri_schedule_interval: "" });
     expect(container.textContent).toContain("Expiry, from submit");
     expect(container.textContent).not.toContain("Schedule start");
-    expect(container.textContent).not.toContain("Catch up");
+    expect(container.textContent).not.toContain("Exit catch up");
     render({ ri_duration: "", ri_schedule_interval: "30s" });
-    expect(container.textContent).toContain("Schedule start");
-    expect(container.textContent).not.toContain("Catch up");
+    expect(container.textContent).not.toContain("Schedule start");
+    expect(container.textContent).not.toContain("Exit catch up");
     render({ ri_duration: "10m", ri_schedule_interval: "2m", ri_schedule_start: "SUBMIT" });
     expect(container.textContent).toContain("Schedule start");
     expect(container.textContent).toContain("The duration clock starts when you submit");
-    expect(container.textContent).toContain("Catch up");
+    expect(container.textContent).toContain("Exit catch up");
+    expect(container.textContent).not.toContain("missed slice");
   });
 
   it("warns before submit when another tier uses this stop", () => {

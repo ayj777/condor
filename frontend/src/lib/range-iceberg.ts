@@ -145,6 +145,26 @@ export function scheduleSliceCount(
 }
 
 /**
+ * Blank-duration slices when the slice amount does not divide the total.
+ * The executor places full slices, then one shorter last slice.
+ */
+export function unevenSliceText(
+  total: number,
+  sliceAmount: number,
+  symbol: string,
+): string | null {
+  if (!(sliceAmount > 0) || !(total > sliceAmount)) return null;
+  const full = Math.floor(total / sliceAmount + 1e-12);
+  const last = Number((total - sliceAmount * full).toPrecision(12));
+  if (full < 1 || !(last > 1e-9)) return null;
+  const unit = symbol ? ` ${symbol}` : "";
+  const head = full === 1 ? "1 slice" : `${full} slices`;
+  const each = formatTokenAmount(sliceAmount);
+  const rest = formatTokenAmount(last);
+  return `${head} of ${each}${unit} then ${rest}${unit}`;
+}
+
+/**
  * An interval string for a saved slice count.
  *
  * `duration / slices`, written so parsing it back still floors to that count.
@@ -661,6 +681,9 @@ export function validateRangeIceberg(input: RangeIcebergInput): string | null {
   if (input.mode === "RANGE" && input.visibleCount > input.levels) {
     return "Visible count cannot exceed levels";
   }
+  if (input.sliceAmount < 0) {
+    return "Slice amount must be greater than 0";
+  }
   if (input.sliceAmount > 0 && input.sliceAmount > input.totalAmount) {
     return "Slice amount cannot exceed the total";
   }
@@ -675,8 +698,13 @@ export function validateRangeIceberg(input: RangeIcebergInput): string | null {
   if (input.weight < -1 || input.weight > 1) return "Weight must be between -1 and 1";
   const hasDuration = input.duration.trim().length > 0;
   const durationSeconds = hasDuration ? parseDuration(input.duration) : null;
-  if (hasDuration && durationSeconds == null) {
-    return "Duration must be seconds or a value like 30m, 24h, 1d";
+  if (hasDuration) {
+    if (durationSeconds == null) {
+      return "Duration must be seconds or a value like 30m, 24h, 1d";
+    }
+    if (durationSeconds <= 0) {
+      return "Duration must be greater than 0";
+    }
   }
   const hasInterval = input.scheduleInterval.trim().length > 0;
   const intervalSeconds = hasInterval ? parseDuration(input.scheduleInterval) : null;
@@ -925,7 +953,7 @@ export function rangeIcebergConfig(
   if (input.duration.trim()) config.duration = input.duration.trim();
   if (input.scheduleInterval.trim()) {
     config.schedule_interval = input.scheduleInterval.trim();
-    config.schedule_start = input.scheduleStart;
+    if (input.duration.trim()) config.schedule_start = input.scheduleStart;
   }
   if (input.takeProfit) config.take_profit = exitPayload("take_profit", input.takeProfit);
   if (input.stopLoss) config.stop_loss = exitPayload("stop_loss", input.stopLoss);
@@ -951,6 +979,8 @@ export function scheduleNote(args: {
   baseSymbol: string;
   quoteSymbol: string;
   price: number | null;
+  /** Set when the order should stop at expiry with size still left. */
+  expiry?: string;
   /** Ladder base for the whole order. Used instead of `total / price`. */
   baseTotal?: number | null;
 }): string | null {
@@ -966,14 +996,19 @@ export function scheduleNote(args: {
     levels: args.levels,
   });
   if (count == null) return null;
-  const pieces = [`${count} ${count === 1 ? "slice" : "slices"}`];
-  if (args.total > 0) {
+  const symbol = args.unit === "QUOTE"
+    ? args.quoteSymbol
+    : args.unit === "CONTRACTS"
+      ? "contracts"
+      : args.baseSymbol;
+  const uneven = hasDuration
+    ? null
+    : unevenSliceText(args.total, args.sliceAmount, symbol);
+  const pieces = uneven
+    ? [uneven]
+    : [`${count} ${count === 1 ? "slice" : "slices"}`];
+  if (!uneven && args.total > 0) {
     const per = args.total / count;
-    const symbol = args.unit === "QUOTE"
-      ? args.quoteSymbol
-      : args.unit === "CONTRACTS"
-        ? "contracts"
-        : args.baseSymbol;
     const amount = [formatTokenAmount(per), symbol].filter(Boolean).join(" ");
     let other = "";
     if (args.unit === "QUOTE" && args.baseTotal != null && args.baseTotal > 0 && args.baseSymbol) {
@@ -993,7 +1028,12 @@ export function scheduleNote(args: {
     "Each slice goes out one interval after the previous slice fully fills",
   ];
   if (!hasDuration) {
-    sentences.push("No time limit; runs until the full amount fills");
+    const expirySeconds = args.expiry?.trim() ? parseDuration(args.expiry) : null;
+    sentences.push(
+      expirySeconds != null && expirySeconds > 0
+        ? "The run stops at expiry if size is still left"
+        : "No time limit; runs until the full amount fills",
+    );
   }
   return `${sentences.join(". ")}.`;
 }

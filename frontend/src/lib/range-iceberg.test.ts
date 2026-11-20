@@ -589,7 +589,7 @@ describe("range iceberg", () => {
     );
     expect(config.duration).toBeUndefined();
     expect(config.schedule_interval).toBe("30s");
-    expect(config.schedule_start).toBe("FIRST_FILL");
+    expect(config).not.toHaveProperty("schedule_start");
     expect(config.slice_amount).toBe(25);
     expect(config.levels).toBe(10);
     expect(config).not.toHaveProperty("schedule_slices");
@@ -648,6 +648,33 @@ describe("range iceberg", () => {
     })).toBe(
       "6 slices, about 50 USDT (\u2248 625 AIOT). Each slice goes out one interval after the previous slice fully fills. No time limit; runs until the full amount fills.",
     );
+    expect(scheduleNote({
+      duration: "",
+      interval: "10m",
+      total: 100,
+      sliceAmount: 30,
+      levels: 10,
+      unit: "QUOTE",
+      baseSymbol: "AIOT",
+      quoteSymbol: "USDT",
+      price: 0.08,
+    })).toBe(
+      "3 slices of 30 USDT then 10 USDT. Each slice goes out one interval after the previous slice fully fills. No time limit; runs until the full amount fills.",
+    );
+    expect(scheduleNote({
+      duration: "",
+      interval: "10m",
+      total: 100,
+      sliceAmount: 30,
+      levels: 10,
+      unit: "QUOTE",
+      baseSymbol: "AIOT",
+      quoteSymbol: "USDT",
+      price: 0.08,
+      expiry: "30m",
+    })).toBe(
+      "3 slices of 30 USDT then 10 USDT. Each slice goes out one interval after the previous slice fully fills. The run stops at expiry if size is still left.",
+    );
   });
 
   it("hides the schedule note when the interval is missing", () => {
@@ -679,6 +706,16 @@ describe("range iceberg", () => {
     expect(validateRangeIceberg(input({ duration: "10m", scheduleInterval: "1h" }))).toBe(
       "Schedule interval cannot be longer than the duration",
     );
+    expect(validateRangeIceberg(input({ duration: "0", scheduleInterval: "30s" }))).toBe(
+      "Duration must be greater than 0",
+    );
+    expect(validateRangeIceberg(input({ duration: "0s", scheduleInterval: "1m" }))).toBe(
+      "Duration must be greater than 0",
+    );
+    expect(validateRangeIceberg(input({ sliceAmount: -1 }))).toBe(
+      "Slice amount must be greater than 0",
+    );
+    expect(validateRangeIceberg(input({ sliceAmount: 0 }))).toBeNull();
   });
 
   it("sends a quote range as quote and previews each rung", () => {
