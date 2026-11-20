@@ -12,6 +12,7 @@ import {
   rangeIcebergPreview,
   scheduleNote,
   scheduleStartLine,
+  unevenSliceText,
   stopProtectionText,
   upToTakeProfitNote,
   type ExitKind,
@@ -39,10 +40,6 @@ const DISTRIBUTION_OPTIONS = [
   { value: "LINEAR", label: "Linear" },
   { value: "GEOMETRIC", label: "Geometric" },
   { value: "WEIGHTED", label: "Weighted" },
-];
-const CATCH_UP_OPTIONS = [
-  { value: "CARRY", label: "Carry" },
-  { value: "SKIP", label: "Skip" },
 ];
 const START_OPTIONS = [
   { value: "SUBMIT", label: "Submit" },
@@ -360,17 +357,30 @@ export function RangeIcebergFields({
     duration: state.ri_duration,
     interval: state.ri_schedule_interval,
     total: sent.error ? state.ri_total_amount : sent.total,
+    sliceAmount: state.ri_slice_amount,
+    levels: state.ri_levels,
     unit: state.ri_size_unit,
     baseSymbol,
     quoteSymbol,
     price: state.ri_mode === "UP_TO" ? (state.ri_limit_price > 0 ? state.ri_limit_price : null) : null,
     baseTotal: !sent.error && state.ri_size_unit === "QUOTE" ? sent.baseTotal : null,
-    catchUp: state.ri_catch_up,
+    expiry: state.ri_expiry,
   });
+  const sizedTotal = sent.error ? state.ri_total_amount : sent.total;
+  const uneven = state.ri_duration.trim()
+    ? null
+    : unevenSliceText(sizedTotal, state.ri_slice_amount, unitSymbol);
   const childLine = preview
     ? [formatTokenAmount(preview.perSlice), unitSymbol].filter(Boolean).join(" ")
     : "";
-  const pacing = oneAtATimeText(state.ri_visible_count, state.ri_duration, state.ri_schedule_interval);
+  const quoteUpTo = state.ri_mode === "UP_TO" && state.ri_size_unit === "QUOTE";
+  const sliceVerb = state.side === 1 ? "buys" : "sells";
+  const childText = uneven && quoteUpTo
+    ? `Each slice ${sliceVerb} at the limit or better. ${uneven}.`
+    : `${uneven ?? `Child size ${childLine}`}${
+        quoteUpTo ? " at the limit. A better price buys more base." : ""
+      }`;
+  const pacing = oneAtATimeText(state.ri_visible_count);
   const jitter = jitterNote(input);
   const stopTrigger = state.ri_sl_enabled
     ? exitTriggerPrice(
@@ -498,9 +508,6 @@ export function RangeIcebergFields({
       {scheduleText && (
         <p className="text-[10px] text-[var(--color-text-muted)]">{scheduleText}</p>
       )}
-      {state.ri_duration.trim() && (
-        <SelectField label="Catch up" value={state.ri_catch_up} field="ri_catch_up" dispatch={dispatch} options={CATCH_UP_OPTIONS} />
-      )}
       {showCap && (
         <SelectField
           label={state.ri_mode === "RANGE" ? "Take profit cap" : "Cap behavior"}
@@ -564,7 +571,7 @@ export function RangeIcebergFields({
           {state.ri_mode === "RANGE" ? (
             <p>{sent.rungs ?? preview.sliceCount} price rungs</p>
           ) : (
-            <p>Child size {childLine}{state.ri_mode === "UP_TO" && state.ri_size_unit === "QUOTE" ? " at the limit. A better price buys more base." : ""}</p>
+            <p>{childText}</p>
           )}
           <p>Interval {formatInterval(preview.intervalSeconds)}</p>
           <p>{pacing}</p>

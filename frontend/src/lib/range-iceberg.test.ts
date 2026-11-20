@@ -9,7 +9,6 @@ import {
   parseDuration,
   rangeIcebergConfig,
   rangeIcebergPreview,
-  scheduleHasRemainder,
   mergeById,
   sameStopPriceWarning,
   scheduleNote,
@@ -168,14 +167,11 @@ describe("same stop price", () => {
 });
 
 describe("one order at a time", () => {
-  it("says the next order waits for a fill, and names the interval when one is set", () => {
-    expect(oneAtATimeText(1, "", "")).toBe(
+  it("says the next order waits for a fill", () => {
+    expect(oneAtATimeText(1)).toBe(
       "One order at a time. The next is placed after the previous one fills.",
     );
-    expect(oneAtATimeText(1, "10m", "1m")).toBe(
-      "One order at a time. The next is placed after the previous one fills. A new share is released every 1m.",
-    );
-    expect(oneAtATimeText(2, "", "")).toBe(
+    expect(oneAtATimeText(2)).toBe(
       "2 orders at a time. The next is placed after one of them fills.",
     );
   });
@@ -200,6 +196,17 @@ describe("range iceberg", () => {
       sliceCount: 10,
       releaseCount: 5,
     });
+  });
+
+  it("previews a blank duration from the slice size", () => {
+    const preview = rangeIcebergPreview(input({
+      duration: "",
+      scheduleInterval: "30s",
+      sliceAmount: 25,
+    }));
+    expect(preview?.intervalSeconds).toBe(30);
+    expect(preview?.releaseCount).toBe(4);
+    expect(preview?.sliceCount).toBe(4);
   });
 
   it("uses levels when there is no schedule", () => {
@@ -234,6 +241,10 @@ describe("range iceberg", () => {
       min_order_interval: 0.6,
     });
     expect(config.duration).toBeUndefined();
+    expect(config).not.toHaveProperty("catch_up");
+    expect(
+      rangeIcebergConfig(input({ catchUp: "SKIP" }), "mexc_perpetual", "AIOT-USDT"),
+    ).not.toHaveProperty("catch_up");
     expect(config.schedule_slices).toBeUndefined();
     expect(config.price_low).toBeUndefined();
     expect(config.margin_mode).toBeUndefined();
@@ -569,56 +580,118 @@ describe("range iceberg", () => {
     expect(config).not.toHaveProperty("slice_amount");
   });
 
-  it("counts slices with the executor formula, including a short last part", () => {
+  it("sends an interval when duration is blank", () => {
+    const config = rangeIcebergConfig(
+      input({
+        duration: "",
+        scheduleInterval: "30s",
+        scheduleStart: "FIRST_FILL",
+        sliceAmount: 25,
+      }),
+      "mexc_perpetual",
+      "AIOT-USDT",
+    );
+    expect(config.duration).toBeUndefined();
+    expect(config.schedule_interval).toBe("30s");
+    expect(config).not.toHaveProperty("schedule_start");
+    expect(config.slice_amount).toBe(25);
+    expect(config.levels).toBe(10);
+    expect(config).not.toHaveProperty("schedule_slices");
+  });
+
+  it("counts slices from the duration, or from size when duration is blank", () => {
     expect(scheduleSliceCount(600, 120)).toBe(5);
     expect(scheduleSliceCount(25 * 60, 10 * 60)).toBe(2);
-    expect(scheduleHasRemainder(25 * 60, 10 * 60)).toBe(true);
-    expect(scheduleHasRemainder(600, 120)).toBe(false);
     expect(scheduleSliceCount(60, 120)).toBeNull();
     expect(intervalFromSliceCount(3600, 7)).toBeTruthy();
     const uneven = parseDuration(intervalFromSliceCount(3600, 7) ?? "");
     expect(uneven).not.toBeNull();
     expect(scheduleSliceCount(3600, uneven ?? 0)).toBe(7);
+    const sizes = { totalAmount: 100, sliceAmount: 0, levels: 10 };
+    expect(scheduleSliceCount(null, 30, sizes)).toBe(10);
+    expect(scheduleSliceCount(null, 30, { ...sizes, sliceAmount: 25 })).toBe(4);
+    expect(scheduleSliceCount(null, 30)).toBeNull();
   });
 
-  it("states the per-interval amount in quote and in base", () => {
+  it("states the fill-gated release in quote and in base", () => {
+    const sizes = { sliceAmount: 0, levels: 10 };
     expect(scheduleNote({
       duration: "1h",
       interval: "10m",
       total: 300,
+      ...sizes,
       unit: "QUOTE",
       baseSymbol: "AIOT",
       quoteSymbol: "USDT",
       price: 0.08,
-      catchUp: "CARRY",
     })).toBe(
-      "6 slices, about 50 USDT (\u2248 625 AIOT) every 10m. While the market is outside the range, a missed slice is placed later. An order already on the book is left to fill.",
+      "6 slices, about 50 USDT (\u2248 625 AIOT). Each slice goes out one interval after the previous slice fully fills.",
     );
     expect(scheduleNote({
       duration: "25m",
       interval: "10m",
       total: 100,
+      ...sizes,
       unit: "BASE",
       baseSymbol: "AIOT",
       quoteSymbol: "USDT",
       price: 0.08,
-      catchUp: "SKIP",
     })).toBe(
-      "2 slices, about 50 AIOT (\u2248 4 USDT) every 10m. The last part of the duration gets no new slice. While the market is outside the range, a missed slice is dropped. An order already on the book is left to fill.",
+      "2 slices, about 50 AIOT (\u2248 4 USDT). Each slice goes out one interval after the previous slice fully fills.",
+    );
+    expect(scheduleNote({
+      duration: "",
+      interval: "10m",
+      total: 300,
+      ...sizes,
+      levels: 6,
+      unit: "QUOTE",
+      baseSymbol: "AIOT",
+      quoteSymbol: "USDT",
+      price: 0.08,
+    })).toBe(
+      "6 slices, about 50 USDT (\u2248 625 AIOT). Each slice goes out one interval after the previous slice fully fills. No time limit; runs until the full amount fills.",
+    );
+    expect(scheduleNote({
+      duration: "",
+      interval: "10m",
+      total: 100,
+      sliceAmount: 30,
+      levels: 10,
+      unit: "QUOTE",
+      baseSymbol: "AIOT",
+      quoteSymbol: "USDT",
+      price: 0.08,
+    })).toBe(
+      "3 slices of 30 USDT then 10 USDT. Each slice goes out one interval after the previous slice fully fills. No time limit; runs until the full amount fills.",
+    );
+    expect(scheduleNote({
+      duration: "",
+      interval: "10m",
+      total: 100,
+      sliceAmount: 30,
+      levels: 10,
+      unit: "QUOTE",
+      baseSymbol: "AIOT",
+      quoteSymbol: "USDT",
+      price: 0.08,
+      expiry: "30m",
+    })).toBe(
+      "3 slices of 30 USDT then 10 USDT. Each slice goes out one interval after the previous slice fully fills. The run stops at expiry if size is still left.",
     );
   });
 
-  it("hides the schedule note when no duration is set", () => {
+  it("hides the schedule note when the interval is missing", () => {
     const common = {
       interval: "10m",
       total: 300,
+      sliceAmount: 0,
+      levels: 10,
       unit: "QUOTE" as const,
       baseSymbol: "AIOT",
       quoteSymbol: "USDT",
       price: 0.08,
-      catchUp: "CARRY" as const,
     };
-    expect(scheduleNote({ ...common, duration: "" })).toBeNull();
     expect(scheduleNote({ ...common, duration: "1h", interval: "" })).toBeNull();
     expect(scheduleNote({ ...common, duration: "10m", interval: "soon" })).toBeNull();
   });
@@ -627,9 +700,7 @@ describe("range iceberg", () => {
     expect(validateRangeIceberg(input({ scheduleInterval: "" }))).toBe(
       "A duration needs a schedule interval",
     );
-    expect(validateRangeIceberg(input({ duration: "", scheduleInterval: "30s" }))).toBe(
-      "A schedule needs a duration",
-    );
+    expect(validateRangeIceberg(input({ duration: "", scheduleInterval: "30s" }))).toBeNull();
     expect(validateRangeIceberg(input({ scheduleInterval: "soon" }))).toBe(
       "Schedule interval must be seconds or a value like 30s",
     );
@@ -639,6 +710,16 @@ describe("range iceberg", () => {
     expect(validateRangeIceberg(input({ duration: "10m", scheduleInterval: "1h" }))).toBe(
       "Schedule interval cannot be longer than the duration",
     );
+    expect(validateRangeIceberg(input({ duration: "0", scheduleInterval: "30s" }))).toBe(
+      "Duration must be greater than 0",
+    );
+    expect(validateRangeIceberg(input({ duration: "0s", scheduleInterval: "1m" }))).toBe(
+      "Duration must be greater than 0",
+    );
+    expect(validateRangeIceberg(input({ sliceAmount: -1 }))).toBe(
+      "Slice amount must be greater than 0",
+    );
+    expect(validateRangeIceberg(input({ sliceAmount: 0 }))).toBeNull();
   });
 
   it("sends a quote range as quote and previews each rung", () => {
@@ -669,12 +750,13 @@ describe("range iceberg", () => {
       duration: "10m",
       interval: "2m",
       total: 100,
+      sliceAmount: 0,
+      levels: 10,
       unit: "QUOTE",
       baseSymbol: "AIOT",
       quoteSymbol: "USDT",
       price: 0.09,
       baseTotal: sent.baseTotal,
-      catchUp: "CARRY",
     });
     expect(perRung).toBeGreaterThan(100 / 0.09 / 5);
     expect(noted).toContain("about 20 USDT");
